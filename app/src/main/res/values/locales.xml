@@ -7,6 +7,7 @@
         <item>русский</item>
         <item>Español</item>
         <item>Svenska</item>
+        <item>Bokmal</item>
         <item>Norsk</item>
         <item>Română</item>
         <item>Polski</item>
@@ -16,6 +17,7 @@
         <item>Nederlands</item>
         <item>Italiano</item>
         <item>Suomi</item>
+        <item>Hrvatski</item>
     </string-array>
     <string-array name="LocaleChoicesValues">
         <item>en</item>
@@ -24,6 +26,7 @@
         <item>ru</item>
         <item>es</item>
         <item>sv</item>
+        <item>nb</item>
         <item>no</item>
         <item>ro</item>
         <item>pl</item>
@@ -33,5 +36,6 @@
         <item>nl</item>
         <item>it</item>
         <item>fi</item>
+        <item>hr</item>
     </string-array>
 </resources>

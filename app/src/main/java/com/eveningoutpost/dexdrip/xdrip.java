@@ -1,5 +1,6 @@
 package com.eveningoutpost.dexdrip;
 
+import android.annotation.SuppressLint;
 import android.app.Application;
 import android.content.Context;
 import android.content.res.Configuration;
@@ -8,34 +9,41 @@ import android.util.Log;
 
 import com.crashlytics.android.Crashlytics;
 import com.crashlytics.android.core.CrashlyticsCore;
-import com.bugfender.sdk.Bugfender;
 import com.eveningoutpost.dexdrip.Models.AlertType;
 import com.eveningoutpost.dexdrip.Models.JoH;
+import com.eveningoutpost.dexdrip.Models.Reminder;
 import com.eveningoutpost.dexdrip.Services.ActivityRecognizedService;
 import com.eveningoutpost.dexdrip.Services.BluetoothGlucoseMeter;
+import com.eveningoutpost.dexdrip.Services.MissedReadingService;
 import com.eveningoutpost.dexdrip.Services.PlusSyncService;
 import com.eveningoutpost.dexdrip.UtilityModels.CollectionServiceStarter;
 import com.eveningoutpost.dexdrip.UtilityModels.IdempotentMigrations;
 import com.eveningoutpost.dexdrip.UtilityModels.PlusAsyncExecutor;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.calibrations.PluggableCalibration;
+import com.eveningoutpost.dexdrip.webservices.XdripWebService;
 
 import java.util.Locale;
 
 import io.fabric.sdk.android.Fabric;
 
+//import com.bugfender.sdk.Bugfender;
+
 /**
- * Created by stephenblack on 3/21/15.
+ * Created by Emma Black on 3/21/15.
  */
 
 public class xdrip extends Application {
 
     private static final String TAG = "xdrip.java";
+    @SuppressLint("StaticFieldLeak")
     private static Context context;
     private static boolean fabricInited = false;
     private static boolean bfInited = false;
     private static Locale LOCALE;
     public static PlusAsyncExecutor executor;
     public static boolean useBF = false;
+    private static Boolean isRunningTestCache;
 
 
     @Override
@@ -53,6 +61,7 @@ public class xdrip extends Application {
         executor = new PlusAsyncExecutor();
         PreferenceManager.setDefaultValues(this, R.xml.pref_general, true);
         PreferenceManager.setDefaultValues(this, R.xml.pref_data_sync, true);
+        PreferenceManager.setDefaultValues(this, R.xml.pref_advanced_settings, true);
         PreferenceManager.setDefaultValues(this, R.xml.pref_notifications, true);
         PreferenceManager.setDefaultValues(this, R.xml.pref_data_source, true);
         PreferenceManager.setDefaultValues(this, R.xml.xdrip_plus_defaults, true);
@@ -63,20 +72,29 @@ public class xdrip extends Application {
 
         JoH.ratelimit("policy-never", 3600); // don't on first load
         new IdempotentMigrations(getApplicationContext()).performAll();
-        NFCReaderX.handleHomeScreenScanPreference(getApplicationContext());
-        AlertType.fromSettings(getApplicationContext());
-        new CollectionServiceStarter(getApplicationContext()).start(getApplicationContext());
-        PlusSyncService.startSyncService(context, "xdrip.java");
-        if (Home.getPreferencesBoolean("motion_tracking_enabled", false)) {
-            ActivityRecognizedService.startActivityRecogniser(getApplicationContext());
-        }
-        BluetoothGlucoseMeter.startIfEnabled();
-        PluggableCalibration.invalidateCache();
 
+
+        if (!isRunningTest()) {
+            MissedReadingService.delayedLaunch();
+            NFCReaderX.handleHomeScreenScanPreference(getApplicationContext());
+            AlertType.fromSettings(getApplicationContext());
+            new CollectionServiceStarter(getApplicationContext()).start(getApplicationContext());
+            PlusSyncService.startSyncService(context, "xdrip.java");
+            if (Pref.getBoolean("motion_tracking_enabled", false)) {
+                ActivityRecognizedService.startActivityRecogniser(getApplicationContext());
+            }
+            BluetoothGlucoseMeter.startIfEnabled();
+            XdripWebService.immortality();
+
+        } else {
+            Log.d(TAG, "Detected running test mode, holding back on background processes");
+        }
+        Reminder.firstInit(xdrip.getAppContext());
+        PluggableCalibration.invalidateCache();
     }
 
     public synchronized static void initCrashlytics(Context context) {
-        if (!fabricInited) {
+        if ((!fabricInited) && !isRunningTest()) {
             try {
                 Crashlytics crashlyticsKit = new Crashlytics.Builder()
                         .core(new CrashlyticsCore.Builder().disabled(BuildConfig.DEBUG).build())
@@ -89,6 +107,20 @@ public class xdrip extends Application {
         }
     }
 
+    public static synchronized boolean isRunningTest() {
+        if (null == isRunningTestCache) {
+            boolean test_framework;
+            try {
+                Class.forName("android.support.test.espresso.Espresso");
+                test_framework = true;
+            } catch (ClassNotFoundException e) {
+                test_framework = false;
+            }
+            isRunningTestCache = test_framework;
+        }
+        return isRunningTestCache;
+    }
+
     public synchronized static void initBF() {
         try {
             if (PreferenceManager.getDefaultSharedPreferences(xdrip.context).getBoolean("enable_bugfender", false)) {
@@ -98,7 +130,7 @@ public class xdrip extends Application {
                         String app_id = PreferenceManager.getDefaultSharedPreferences(xdrip.context).getString("bugfender_appid", "").trim();
                         if (!useBF && (app_id.length() > 10)) {
                             if (!bfInited) {
-                                Bugfender.init(xdrip.context, app_id, BuildConfig.DEBUG);
+                                //Bugfender.init(xdrip.context, app_id, BuildConfig.DEBUG);
                                 bfInited = true;
                             }
                             useBF = true;
@@ -130,8 +162,8 @@ public class xdrip extends Application {
     public static void checkForcedEnglish(Context context) {
         //    if (Locale.getDefault() != Locale.ENGLISH) {
         //       Log.d(TAG, "Locale is non-english");
-        if (Home.getPreferencesBoolean("force_english", false)) {
-            final String forced_language = Home.getPreferencesStringWithDefault("forced_language", "en");
+        if (Pref.getBoolean("force_english", false)) {
+            final String forced_language = Pref.getString("forced_language", "en");
             final String current_language = Locale.getDefault().getLanguage();
             if (!current_language.equals(forced_language)) {
                 Log.i(TAG, "Forcing locale: " + forced_language + " was: " + current_language);
@@ -145,7 +177,8 @@ public class xdrip extends Application {
                     Log.i(TAG, "Using activity context instead of base for Locale change");
                     context.getResources().updateConfiguration(config, context.getResources().getDisplayMetrics());
                 }
-            } Log.d(TAG,"Already set to locale: " + forced_language);
+            }
+            Log.d(TAG, "Already set to locale: " + forced_language);
         }
     }
     //}

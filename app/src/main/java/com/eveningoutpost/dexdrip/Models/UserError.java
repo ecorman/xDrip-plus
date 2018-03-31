@@ -7,35 +7,39 @@ import com.activeandroid.Model;
 import com.activeandroid.annotation.Column;
 import com.activeandroid.annotation.Table;
 import com.activeandroid.query.Select;
-import com.bugfender.sdk.Bugfender;
-import com.eveningoutpost.dexdrip.Home;
-import com.eveningoutpost.dexdrip.xdrip;
+//import com.bugfender.sdk.Bugfender;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
+import com.google.gson.annotations.Expose;
 
 import java.util.Date;
 import java.util.Hashtable;
 import java.util.List;
 
 /**
- * Created by stephenblack on 8/3/15.
+ * Created by Emma Black on 8/3/15.
  */
 
 @Table(name = "UserErrors", id = BaseColumns._ID)
 public class UserError extends Model {
 
     private final static String TAG = UserError.class.getSimpleName();
-    
+
+    @Expose
     @Column(name = "shortError")
     public String shortError; // Short error message to be displayed on table
 
+    @Expose
     @Column(name = "message")
     public String message; // Additional text when error is expanded
 
+    @Expose
     @Column(name = "severity", index = true)
     public int severity; // int between 1 and 3, 3 being most severe
 
     // 5 = internal lower level user events
     // 6 = higher granularity user events
 
+    @Expose
     @Column(name = "timestamp", index = true)
     public double timestamp; // Time the error was raised
 
@@ -55,7 +59,7 @@ public class UserError extends Model {
         this.message = message;
         this.timestamp = new Date().getTime();
         this.save();
-        if (xdrip.useBF) {
+       /* if (xdrip.useBF) {
             switch (severity) {
                 case 2:
                 case 3:
@@ -69,7 +73,7 @@ public class UserError extends Model {
                     Bugfender.d(shortError, message);
                     break;
             }
-        }
+        }*/
     }
 
     public UserError(String shortError, String message) {
@@ -95,6 +99,16 @@ public class UserError extends Model {
 
     public static void cleanup() {
        new Cleanup().execute(deletable());
+    }
+
+    public static void cleanup(long timestamp) {
+        List<UserError> userErrors = new Select()
+                .from(UserError.class)
+                .where("timestamp < ?", timestamp)
+                .orderBy("timestamp desc")
+                .execute();
+        if (userErrors != null) Log.d(TAG, "cleanup UserError size=" + userErrors.size());
+        new Cleanup().execute(userErrors);
     }
 
     public static List<UserError> all() {
@@ -141,12 +155,27 @@ public class UserError extends Model {
                 .execute();
     }
 
+    public static UserError getForTimestamp(UserError error) {
+        try {
+            return new Select()
+                    .from(UserError.class)
+                    .where("timestamp = ?", error.timestamp)
+                    .where("shortError = ?", error.shortError)
+                    .where("message = ?", error.message)
+                    .executeSingle();
+        } catch (Exception e) {
+            Log.e(TAG,"getForTimestamp() Got exception on Select : "+e.toString());
+            return null;
+        }
+    }
+
     private static class Cleanup extends AsyncTask<List<UserError>, Integer, Boolean> {
         @Override
         protected Boolean doInBackground(List<UserError>... errors) {
             try {
                 for(UserError userError : errors[0]) {
                     userError.delete();
+                    //userError.save();
                 }
                 return true;
             } catch(Exception e) {
@@ -237,7 +266,7 @@ public class UserError extends Model {
         static Hashtable <String, Integer> extraTags;
         ExtraLogTags () {
             extraTags = new Hashtable <String, Integer>();
-            String extraLogs = Home.getPreferencesStringDefaultBlank("extra_tags_for_logging");
+            String extraLogs = Pref.getStringDefaultBlank("extra_tags_for_logging");
             readPreference(extraLogs);
         }
         
@@ -248,11 +277,16 @@ public class UserError extends Model {
          * 
          */
         public static void readPreference(String extraLogs) {
+            extraLogs = extraLogs.trim();
             if (extraLogs.length() > 0) UserErrorLow(TAG, "called with string " + extraLogs);
             extraTags.clear();
-            
-            String []tags = extraLogs.split(",");
-            if(tags.length == 0) {
+
+            // allow splitting to work with a single entry and no delimiter zzz
+            if ((extraLogs.length() > 1) && (!extraLogs.contains(","))) {
+                extraLogs += ",";
+            }
+            String[] tags = extraLogs.split(",");
+            if (tags.length == 0) {
                 return;
             }
             
@@ -264,7 +298,7 @@ public class UserError extends Model {
         
         static void parseTag(String tag) {
             // Format is tag:level for example  Alerts:i
-            String[] tagAndLevel = tag.split(":");
+            String[] tagAndLevel = tag.trim().split(":");
             if(tagAndLevel.length != 2) {
                 Log.e(TAG, "Failed to parse " + tag);
                 return;
@@ -287,20 +321,11 @@ public class UserError extends Model {
                 return;
             }
             Log.e(TAG, "Unknown level for tag " + tag + " please use d v or i");
-
         }
         
         static boolean shouldLogTag(String tag, int level) {
             Integer levelForTag = extraTags.get(tag.toLowerCase());
-            if(levelForTag == null) {
-                return false;
-            }
-            
-            if(level >= levelForTag) {
-                return true;
-            }
-            
-            return false;
+            return levelForTag != null && level >= levelForTag;
         }
         
     }

@@ -38,7 +38,7 @@ public class PlusSyncService extends Service {
         startSyncService(context, "clearAndRestart");
     }
 
-    public static void startSyncService(Context context, String source) {
+    public synchronized static void startSyncService(Context context, String source) {
         if (created) {
             Log.d(TAG, "Already created");
             return;
@@ -160,15 +160,16 @@ public class PlusSyncService extends Service {
                         updateCheckThenStop();
                     } else {
                         Log.d(TAG, "Calling Google Cloud Interface");
-                        Intent dialogIntent = new Intent(context, GcmActivity.class);
-                        dialogIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        dialogIntent.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
-                        dialogIntent.addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY);
-                        startActivity(dialogIntent);
+                        //Intent dialogIntent = new Intent(context, GcmActivity.class);
+                        //dialogIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        //dialogIntent.addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+                        //dialogIntent.addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY);
+                        //startActivity(dialogIntent);
+
+                        new GcmActivity().jumpStart();
                     }
                 } else {
                     Log.d(TAG, "Got our token - stopping polling");
-
                     updateCheckThenStop();
                 }
             }

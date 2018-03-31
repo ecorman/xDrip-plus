@@ -1,5 +1,6 @@
 package com.eveningoutpost.dexdrip;
 
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.TimePickerDialog;
@@ -43,7 +44,9 @@ import com.eveningoutpost.dexdrip.Models.UserError.Log;
 import com.eveningoutpost.dexdrip.UtilityModels.AlertPlayer;
 import com.eveningoutpost.dexdrip.UtilityModels.BgGraphBuilder;
 import com.eveningoutpost.dexdrip.UtilityModels.Constants;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.utils.ActivityWithMenu;
+import com.eveningoutpost.dexdrip.wearintegration.WatchUpdaterService;
 
 import java.text.DecimalFormat;
 import java.text.ParseException;
@@ -51,6 +54,8 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+
+import static com.eveningoutpost.dexdrip.Home.startWatchUpdaterService;
 
 public class EditAlertActivity extends ActivityWithMenu {
     //public static String menu_name = "Edit Alert";
@@ -542,6 +547,8 @@ public class EditAlertActivity extends ActivityWithMenu {
                 }  else {
                     AlertType.add_alert(null, alertText.getText().toString(), above, threshold, allDay, alertReraise, mp3_file, timeStart, timeEnd, overrideSilentMode, defaultSnooze, vibrate, !disabled);
                 }
+
+                startWatchUpdaterService(mContext, WatchUpdaterService.ACTION_SYNC_ALERTTYPE, TAG);
                 Intent returnIntent = new Intent();
                 setResult(RESULT_OK,returnIntent);
                 finish();
@@ -557,6 +564,7 @@ public class EditAlertActivity extends ActivityWithMenu {
                     Log.wtf(TAG, "Error remove pressed, while we were adding an alert");
                 }  else {
                     AlertType.remove_alert(uuid);
+                    startWatchUpdaterService(mContext, WatchUpdaterService.ACTION_SYNC_ALERTTYPE, TAG);
                 }
                 Intent returnIntent = new Intent();
                 setResult(RESULT_OK,returnIntent);
@@ -868,27 +876,33 @@ public class EditAlertActivity extends ActivityWithMenu {
 
     }
 
-    private boolean checkPermissions()
-    {
+    private boolean checkPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             if (ContextCompat.checkSelfPermission(getApplicationContext(),
                     android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
                     != PackageManager.PERMISSION_GRANTED) {
-
-                ActivityCompat.requestPermissions(this,
-                        new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE},
-                        MY_PERMISSIONS_REQUEST_STORAGE);
+                final Activity activity = this;
+                JoH.show_ok_dialog(activity, "Please Allow Permission", "Need storage permission to access all ringtones", new Runnable() {
+                    @Override
+                    public void run() {
+                        ActivityCompat.requestPermissions(activity,
+                                new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, MY_PERMISSIONS_REQUEST_STORAGE);
+                    }
+                });
                 return false;
             }
         }
         return true;
     }
 
+
     public void testAlert() {
         // Check that values are ok.
         double threshold = parseDouble(alertThreshold.getText().toString());
-        if(Double.isNaN(threshold))
+        if(Double.isNaN(threshold)) {
+          JoH.static_toast_long("Threshold number is not valid");
             return;
+        }
 
         threshold = unitsConvertFromDisp(threshold);
 
@@ -919,6 +933,15 @@ public class EditAlertActivity extends ActivityWithMenu {
         String mp3_file = audioPath;
         try {
             int defaultSnooze = safeGetDefaultSnooze();
+
+            if (Pref.getBooleanDefaultFalse("start_snoozed"))  {
+                JoH.static_toast_long("Start Snoozed setting means alert would normally start silent");
+            } else if (Pref.getStringDefaultBlank("bg_alert_profile").equals("ascending")) {
+                JoH.static_toast_long("Ascending Volume Profile means it will start silent");
+            } else if (Pref.getStringDefaultBlank("bg_alert_profile").equals("Silent")) {
+                JoH.static_toast_long("Volume Profile is set to silent!");
+            }
+
             AlertType.testAlert(alertText.getText().toString(), above, threshold, allDay, 1, mp3_file, timeStart, timeEnd, overrideSilentMode, defaultSnooze, vibrate, mContext);
         } catch (NullPointerException e) {
             JoH.static_toast_long("Snooze value is not a number - cannot test");

@@ -17,12 +17,13 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.eveningoutpost.dexdrip.UtilityModels.BgGraphBuilder;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.stats.StatsResult;
 import com.eveningoutpost.dexdrip.utils.ActivityWithMenu;
 
 import java.text.DateFormat;
+import java.text.DecimalFormat;
 import java.util.Calendar;
-import java.util.Date;
 import java.util.GregorianCalendar;
 import java.util.Locale;
 
@@ -169,7 +170,7 @@ public class BGHistory extends ActivityWithMenu {
 
     private void setupStatistics(long from, long to) {
 
-        if (Home.getPreferencesBoolean("show_history_stats", true)) {
+        if (Pref.getBoolean("show_history_stats", true)) {
             StatsResult statsResult = new StatsResult(PreferenceManager.getDefaultSharedPreferences(this.getApplicationContext()), from, to);
 
             StringBuilder sb = new StringBuilder();
@@ -185,6 +186,37 @@ public class BGHistory extends ActivityWithMenu {
             sb.append(statsResult.getHighPercentage());
             sb.append(' ');
             sb.append(statsResult.getLowPercentage());
+            sb.append(' ');
+            sb.append(statsResult.getStdevUnitised());
+            sb.append(' ');
+            sb.append(statsResult.getGVI());
+            DecimalFormat df = new DecimalFormat(getResources().getString(R.string.format_decimal_treatments));
+            if (Pref.getBoolean("status_line_insulin", true)) {
+                sb.append('\n');
+                double insulin = statsResult.getTotal_insulin();
+                sb.append(getResources().getString(R.string.label_show_insulin, df.format(insulin)));
+            }
+            if (Pref.getBoolean("status_line_carbs", true)) {
+                sb.append(' ');
+                double carbs = statsResult.getTotal_carbs();
+                sb.append(getResources().getString(R.string.label_show_carbs, df.format(carbs)));
+            }
+            if (Pref.getBoolean("status_line_royce_ratio", false)) {
+                sb.append(' ');
+                double ratio = statsResult.getRatio();
+                sb.append(getResources().getString(R.string.label_show_royceratio, df.format(ratio)));
+            }
+            if (Pref.getBoolean("use_pebble_health", true)) {
+                sb.append('\n');
+                int steps = statsResult.getTotal_steps();
+                sb.append(getResources().getString(R.string.label_show_steps, steps));
+                if (steps > 0) {
+                    Double km = (((double) steps) / 2000.0d) * 1.6d;
+                    Double mi = (((double) steps) / 2000.0d) * 1.0d;
+                    sb.append((km > 0.0 ? " " + getResources().getString(R.string.label_show_steps_km, df.format(km)) : "") +
+                            (mi > 0.0 ? " " + getResources().getString(R.string.label_show_steps_mi, df.format(mi)) : ""));
+                }
+            }
             sb.append('\n');
             sb.append(statsResult.getCapturePercentage(true));
             sb.append(' ');
@@ -245,7 +277,7 @@ public class BGHistory extends ActivityWithMenu {
         getMenuInflater().inflate(R.menu.menu_history, menu);
 
         MenuItem menuItem = menu.findItem(R.id.action_toggle_historystats);
-        menuItem.setChecked(Home.getPreferencesBoolean("show_history_stats", true));
+        menuItem.setChecked(Pref.getBoolean("show_history_stats", true));
 
         return super.onCreateOptionsMenu(menu);
     }
@@ -253,7 +285,7 @@ public class BGHistory extends ActivityWithMenu {
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         if (item.getItemId() == R.id.action_toggle_historystats) {
-            Home.setPreferencesBoolean("show_history_stats", !Home.getPreferencesBoolean("show_history_stats", true));
+            Pref.setBoolean("show_history_stats", !Pref.getBoolean("show_history_stats", true));
             invalidateOptionsMenu();
             setupCharts();
             return true;

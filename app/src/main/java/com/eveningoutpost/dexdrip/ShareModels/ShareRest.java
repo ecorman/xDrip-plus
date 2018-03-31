@@ -39,7 +39,7 @@ import retrofit.GsonConverterFactory;
 import retrofit.Retrofit;
 
 /**
- * Created by stephenblack on 12/26/14.
+ * Created by Emma Black on 12/26/14.
  */
 public class ShareRest {
     public static String TAG = ShareRest.class.getSimpleName();
@@ -128,7 +128,7 @@ public class ShareRest {
             sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
             final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
 
-            OkHttpClient okHttpClient = new OkHttpClient();
+            final OkHttpClient okHttpClient = new OkHttpClient();
             okHttpClient.networkInterceptors().add(new Interceptor() {
                 @Override
                 public Response intercept(Chain chain) throws IOException {

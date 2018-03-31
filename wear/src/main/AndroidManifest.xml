@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     package="com.eveningoutpost.dexdrip">
 
     <uses-feature android:name="android.hardware.type.watch" />
@@ -7,16 +8,26 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_PRIVILEGED" />
+    <uses-permission android:name="android.permission.DEVICE_POWER"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
     <!-- Declaration that this app is usable on phones with Bluetooth Low Energy. -->
-    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
+    <uses-permission-sdk-23 android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission-sdk-23 android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER"/>
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
 
     <application
-        android:allowBackup="true"
+        android:name=".xdrip"
+        tools:replace="android:allowBackup"
+        android:allowBackup="false"
         android:icon="@drawable/ic_icon"
         android:label="@string/app_name"
         android:theme="@android:style/Theme.DeviceDefault">
@@ -32,7 +43,7 @@
             android:value="41" />
         <meta-data
             android:name="AA_MODELS"
-            android:value="com.eveningoutpost.dexdrip.Models.ActiveBgAlert,com.eveningoutpost.dexdrip.Models.ActiveBluetoothDevice,com.eveningoutpost.dexdrip.Models.AlertType,com.eveningoutpost.dexdrip.Models.BgReading,com.eveningoutpost.dexdrip.Models.BgReading,com.eveningoutpost.dexdrip.Models.Calibration,com.eveningoutpost.dexdrip.Models.Calibration,com.eveningoutpost.dexdrip.Models.CalibrationRequest,com.eveningoutpost.dexdrip.Models.Sensor,com.eveningoutpost.dexdrip.Models.TransmitterData,com.eveningoutpost.dexdrip.Models.Treatments,com.eveningoutpost.dexdrip.Models.UserError,com.eveningoutpost.dexdrip.Models.UserNotification,com.eveningoutpost.dexdrip.ShareModels.Models,com.eveningoutpost.dexdrip.UtilityModels.BgSendQueue,com.eveningoutpost.dexdrip.UtilityModels.CalibrationSendQueue,com.eveningoutpost.dexdrip.UtilityModels.SensorSendQueue"/>
+            android:value="com.eveningoutpost.dexdrip.Models.ActiveBgAlert,com.eveningoutpost.dexdrip.Models.ActiveBluetoothDevice,com.eveningoutpost.dexdrip.Models.AlertType,com.eveningoutpost.dexdrip.Models.BgReading,com.eveningoutpost.dexdrip.Models.Calibration,com.eveningoutpost.dexdrip.Models.CalibrationRequest,com.eveningoutpost.dexdrip.Models.PebbleMovement,com.eveningoutpost.dexdrip.Models.HeartRate,com.eveningoutpost.dexdrip.Models.BloodTest,com.eveningoutpost.dexdrip.Models.Sensor,com.eveningoutpost.dexdrip.Models.TransmitterData,com.eveningoutpost.dexdrip.Models.Treatments,com.eveningoutpost.dexdrip.Models.UserError,com.eveningoutpost.dexdrip.Models.UserNotification,com.eveningoutpost.dexdrip.ShareModels.Models,com.eveningoutpost.dexdrip.UtilityModels.BgSendQueue,com.eveningoutpost.dexdrip.UtilityModels.CalibrationSendQueue,com.eveningoutpost.dexdrip.UtilityModels.SensorSendQueue"/>
 
         <service
             android:name=".Home"
@@ -104,7 +115,21 @@
         </service>
         <service android:name=".ListenerService">
             <intent-filter>
-                <action android:name="com.google.android.gms.wearable.BIND_LISTENER" />
+                <action android:name="com.google.android.gms.wearable.CAPABILITY_CHANGED" />
+                <data android:scheme="wear" android:host="*"/>
+            </intent-filter>
+            <intent-filter>
+                <!-- <action android:name="com.google.android.gms.wearable.BIND_LISTENER" /> -->
+                <!-- listeners receive events that match the action and data filters -->
+                <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
+                <!-- filters by Constants.EXTRA_ATTRACTIONS
+                Constants.START_ATTRACTION_PATH ('/start/attraction') and
+                Constants.START_NAVIGATION_PATH ('/start/navigation')
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/start"/> -->
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/xdrip"/>
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/nightscout"/>
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/sendstatustowear"/>
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/openwearsettings"/>
             </intent-filter>
         </service>
         <service
@@ -112,9 +137,51 @@
             android:enabled="true"
             android:exported="true" >
         </service>
+        <service
+            android:name=".Services.Ob1G5CollectionService"
+            android:enabled="true" />
+        <service
+            android:name=".Services.DexCollectionService"
+            android:enabled="true"
+            android:exported="true" />
+        <service
+            android:name=".Services.DexShareCollectionService"
+            android:enabled="true"
+            android:exported="true" />
+        <service
+            android:name=".UtilityModels.Notifications"
+            android:exported="false" />
+        <service
+            android:name=".Services.SnoozeOnNotificationDismissService"
+            android:exported="false" />
+        <service
+            android:name=".Services.MissedReadingService"
+            android:enabled="true"
+            android:exported="true" />
+        <service
+            android:name=".Services.CustomComplicationProviderService"
+            android:icon="@drawable/ic_watch_white"
+            android:label="xDrip Complication Provider"
+            android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
+            <intent-filter>
+                <action android:name="android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.support.wearable.complications.SUPPORTED_TYPES"
+                android:value="SHORT_TEXT,LONG_TEXT" />
+            <meta-data
+                android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
+                android:value="300" />
+        </service>
+        <service android:name=".Services.HeartRateService"></service>
+        <receiver android:name=".Services.ComplicationTapBroadcastReceiver" />
         <activity
             android:name=".NWPreferences"
+            android:icon="@drawable/ic_icon"
+            android:launchMode="singleTask"
             android:label="@string/app_name">
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
@@ -151,10 +218,40 @@
             </intent-filter>
         </activity>
         <activity
+            android:launchMode="singleTop"
             android:name=".LocationPermissionActivity"
             android:label="title_activity_location_permission" >
             android:theme="android:theme="@style/Theme.AppCompat.Light"
         </activity>
+        <activity
+            android:name=".SnoozeActivity"
+            android:configChanges="orientation|screenSize"
+            android:label="@string/snooze" />
+        <activity
+            android:name=".MenuActivity"
+            android:configChanges="orientation|screenSize"
+            android:label="Menu" />
+        <activity
+            android:name=".Tables.CalibrationDataTable"
+            android:configChanges="orientation|screenSize"
+            android:label="@string/calibration_data_table" />
+        <activity
+            android:name=".Tables.BgReadingTable"
+            android:configChanges="orientation|screenSize"
+            android:label="@string/bg_readings_table" />
+        <activity
+            android:name=".Tables.SensorDataTable"
+            android:configChanges="orientation|screenSize"
+            android:label="@string/sensor_table" />
+        <activity
+            android:name=".Tables.BloodTestTable"
+            android:configChanges="orientation|screenSize"
+            android:label="@string/bg_readings_table" />
+        <activity
+            android:name=".Tables.TreatmentsTable"
+            android:configChanges="orientation|screenSize"
+            android:label="@string/bg_readings_table" />
+        <activity android:name=".SensorPermissionActivity" />
     </application>
 
 </manifest>

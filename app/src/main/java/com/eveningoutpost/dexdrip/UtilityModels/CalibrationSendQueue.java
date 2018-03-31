@@ -17,8 +17,9 @@ import com.eveningoutpost.dexdrip.Models.UserError.Log;
 import java.util.List;
 
 /**
- * Created by stephenblack on 11/7/14.
+ * Created by Emma Black on 11/7/14.
  */
+@Deprecated
 @Table(name = "CalibrationSendQueue", id = BaseColumns._ID)
 public class CalibrationSendQueue extends Model {
     private final static String TAG = CalibrationSendQueue.class.getSimpleName();
@@ -50,6 +51,7 @@ public class CalibrationSendQueue extends Model {
                 .execute();
     }
 
+    @Deprecated
     public static List<CalibrationSendQueue> cleanQueue() {
         return new Delete()
                 .from(CalibrationSendQueue.class)
@@ -58,11 +60,15 @@ public class CalibrationSendQueue extends Model {
     }
 
     public static void addToQueue(Calibration calibration, Context context) {
-        CalibrationSendQueue calibrationSendQueue = new CalibrationSendQueue();
-        calibrationSendQueue.calibration = calibration;
-        calibrationSendQueue.success = false;
-        calibrationSendQueue.mongo_success = false;
-        calibrationSendQueue.save();
+
+        // TODO support for various insert/update/delete functions
+
+        //  CalibrationSendQueue calibrationSendQueue = new CalibrationSendQueue();
+        //  calibrationSendQueue.calibration = calibration;
+        //  calibrationSendQueue.success = false;
+        //  calibrationSendQueue.mongo_success = false;
+        //  calibrationSendQueue.save();
+        UploaderQueue.newEntry("create", calibration);
         Log.i(TAG, "calling SensorSendQueue.SendToFollower");
         SensorSendQueue.SendToFollower(Sensor.getByUuid(calibration.sensor_uuid));
     }

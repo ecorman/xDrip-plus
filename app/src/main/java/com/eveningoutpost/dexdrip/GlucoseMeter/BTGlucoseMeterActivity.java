@@ -25,11 +25,11 @@ import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.eveningoutpost.dexdrip.Home;
 import com.eveningoutpost.dexdrip.Models.JoH;
 import com.eveningoutpost.dexdrip.Models.UserError;
 import com.eveningoutpost.dexdrip.R;
 import com.eveningoutpost.dexdrip.Services.BluetoothGlucoseMeter;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.utils.ListActivityWithMenu;
 import com.eveningoutpost.dexdrip.utils.LocationHelper;
 
@@ -71,95 +71,95 @@ public class BTGlucoseMeterActivity extends ListActivityWithMenu {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR2) {
             JoH.static_toast_long("The android version of this device is not compatible with Bluetooth Low Energy");
             finish();
-        }
+        } else {
 
-        bluetooth_manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+            bluetooth_manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
 
-        bluetooth_adapter = bluetooth_manager.getAdapter();
+            bluetooth_adapter = bluetooth_manager.getAdapter();
 
 
-        if (bluetooth_adapter == null) {
-            Toast.makeText(this, R.string.error_bluetooth_not_supported, Toast.LENGTH_LONG).show();
-            finish();
-            return;
-        }
-
-        // get bluetooth ready
-        check_and_enable_bluetooth();
-        LocationHelper.requestLocationForBluetooth(this);
-
-        serviceDataReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context ctx, Intent intent) {
-                final String action = intent.getAction();
-                UserError.Log.d(TAG, "Got receive:" + action + " :: " + intent.getStringExtra("data"));
-                switch (action) {
-                    case BluetoothGlucoseMeter.ACTION_BLUETOOTH_GLUCOSE_METER_SERVICE_UPDATE:
-                        statusText.setText(intent.getStringExtra("data"));
-                        break;
-                    case BluetoothGlucoseMeter.ACTION_BLUETOOTH_GLUCOSE_METER_NEW_SCAN_DEVICE:
-                        mLeDeviceListAdapter.addDevice(intent.getStringExtra("data"));
-                        break;
-                }
+            if (bluetooth_adapter == null) {
+                Toast.makeText(this, R.string.error_bluetooth_not_supported, Toast.LENGTH_LONG).show();
+                finish();
+                return;
             }
-        };
 
-        mLeDeviceListAdapter = new LeDeviceListAdapter();
+            // get bluetooth ready
+            check_and_enable_bluetooth();
+            LocationHelper.requestLocationForBluetooth(this);
+
+            serviceDataReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context ctx, Intent intent) {
+                    final String action = intent.getAction();
+                    UserError.Log.d(TAG, "Got receive:" + action + " :: " + intent.getStringExtra("data"));
+                    switch (action) {
+                        case BluetoothGlucoseMeter.ACTION_BLUETOOTH_GLUCOSE_METER_SERVICE_UPDATE:
+                            statusText.setText(intent.getStringExtra("data"));
+                            break;
+                        case BluetoothGlucoseMeter.ACTION_BLUETOOTH_GLUCOSE_METER_NEW_SCAN_DEVICE:
+                            mLeDeviceListAdapter.addDevice(intent.getStringExtra("data"));
+                            break;
+                    }
+                }
+            };
+
+            mLeDeviceListAdapter = new LeDeviceListAdapter();
 
 
-        setListAdapter(mLeDeviceListAdapter);
+            setListAdapter(mLeDeviceListAdapter);
 
-        // long click call back
-        getListView().setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
-            @Override
-            public boolean onItemLongClick(AdapterView<?> adapterView, View v,
-                                           int position, long id) {
+            // long click call back
+            getListView().setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
+                @Override
+                public boolean onItemLongClick(AdapterView<?> adapterView, View v,
+                                               int position, long id) {
 
-                final MyBluetoothDevice device = mLeDeviceListAdapter.getDevice(position);
-                if (device != null) {
-                    final AlertDialog.Builder builder = new AlertDialog.Builder(adapterView.getContext());
-                    builder.setTitle("Choose Action");
-                    builder.setMessage("You can disconnect from this device or forget its pairing here");
+                    final MyBluetoothDevice device = mLeDeviceListAdapter.getDevice(position);
+                    if (device != null) {
+                        final AlertDialog.Builder builder = new AlertDialog.Builder(adapterView.getContext());
+                        builder.setTitle("Choose Action");
+                        builder.setMessage("You can disconnect from this device or forget its pairing here");
 
-                    builder.setNeutralButton("Do Nothing", new DialogInterface.OnClickListener() {
-                        public void onClick(DialogInterface dialog, int which) {
-                            dialog.dismiss();
-                        }
-                    });
-
-                    builder.setPositiveButton("Disconnect", new DialogInterface.OnClickListener() {
-                        public void onClick(DialogInterface dialog, int which) {
-                            dialog.dismiss();
-                            if (Home.getPreferencesStringDefaultBlank("selected_bluetooth_meter_address").equals(device.address)) {
-                                Home.setPreferencesString("selected_bluetooth_meter_address", "");
-                                mLeDeviceListAdapter.changed();
-                                JoH.static_toast_long("Disconnected!");
-                                BluetoothGlucoseMeter.start_service(null);
-                            } else {
-                                JoH.static_toast_short("Not connected to this device!");
+                        builder.setNeutralButton("Do Nothing", new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface dialog, int which) {
+                                dialog.dismiss();
                             }
-                        }
-                    });
+                        });
 
-                    builder.setNegativeButton("Forget Pair", new DialogInterface.OnClickListener() {
-                        @Override
-                        public void onClick(DialogInterface dialog, int which) {
-                            start_forget(device.address);
-                            dialog.dismiss();
-                        }
-                    });
+                        builder.setPositiveButton("Disconnect", new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface dialog, int which) {
+                                dialog.dismiss();
+                                if (Pref.getStringDefaultBlank("selected_bluetooth_meter_address").equals(device.address)) {
+                                    Pref.setString("selected_bluetooth_meter_address", "");
+                                    mLeDeviceListAdapter.changed();
+                                    JoH.static_toast_long("Disconnected!");
+                                    BluetoothGlucoseMeter.start_service(null);
+                                } else {
+                                    JoH.static_toast_short("Not connected to this device!");
+                                }
+                            }
+                        });
 
-                    AlertDialog alert = builder.create();
-                    alert.show();
-                } else {
-                    UserError.Log.wtf(TAG, "Null pointer on list item long click");
+                        builder.setNegativeButton("Forget Pair", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                start_forget(device.address);
+                                dialog.dismiss();
+                            }
+                        });
+
+                        AlertDialog alert = builder.create();
+                        alert.show();
+                    } else {
+                        UserError.Log.wtf(TAG, "Null pointer on list item long click");
+                    }
+
+                    return true;
                 }
-
-                return true;
-            }
-        });
-        getListView().setLongClickable(true);
-
+            });
+            getListView().setLongClickable(true);
+        }
     }
 
     @Override
@@ -189,7 +189,7 @@ public class BTGlucoseMeterActivity extends ListActivityWithMenu {
 
     private void check_and_enable_bluetooth() {
         if (!bluetooth_manager.getAdapter().isEnabled()) {
-            if (Home.getPreferencesBoolean("automatically_turn_bluetooth_on", true)) {
+            if (Pref.getBoolean("automatically_turn_bluetooth_on", true)) {
                 JoH.setBluetoothEnabled(getApplicationContext(), true);
                 Toast.makeText(this, "Trying to turn Bluetooth on", Toast.LENGTH_LONG).show();
             } else {
@@ -361,7 +361,7 @@ public class BTGlucoseMeterActivity extends ListActivityWithMenu {
             MyBluetoothDevice device = mLeDevices.get(i);
             final String deviceName = device.name;
 
-            if (Home.getPreferencesStringWithDefault("selected_bluetooth_meter_address", "").equals(device.address)) {
+            if (Pref.getString("selected_bluetooth_meter_address", "").equals(device.address)) {
                 viewHolder.deviceName.setTextColor(Color.parseColor("#ff99dd00"));
             } else {
                 viewHolder.deviceName.setTextColor(Color.WHITE);

@@ -1,31 +1,39 @@
 package com.eveningoutpost.dexdrip.UtilityModels;
 
-import android.appwidget.AppWidgetManager;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.os.BatteryManager;
-import android.os.Bundle;
 import android.os.PowerManager;
 import android.preference.PreferenceManager;
 import android.provider.BaseColumns;
+import android.support.annotation.NonNull;
 import android.support.v4.content.LocalBroadcastManager;
 
 import com.activeandroid.Model;
 import com.activeandroid.annotation.Column;
 import com.activeandroid.annotation.Table;
 import com.activeandroid.query.Select;
-//KS import com.eveningoutpost.dexdrip.GcmActivity;
-//KS import com.eveningoutpost.dexdrip.Home;
 import com.eveningoutpost.dexdrip.ListenerService;
 import com.eveningoutpost.dexdrip.Models.BgReading;
-//KS import com.eveningoutpost.dexdrip.Models.Calibration;
+import com.eveningoutpost.dexdrip.Models.Calibration;
+import com.eveningoutpost.dexdrip.Models.HeartRate;
 import com.eveningoutpost.dexdrip.Models.JoH;
+import com.eveningoutpost.dexdrip.Models.PebbleMovement;
 import com.eveningoutpost.dexdrip.Models.UserError.Log;
+import com.eveningoutpost.dexdrip.Services.CustomComplicationProviderService;
+import com.eveningoutpost.dexdrip.stats.StatsResult;
+import com.eveningoutpost.dexdrip.xdrip;
+import com.google.android.gms.wearable.DataMap;
 
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
 
+//KS import com.eveningoutpost.dexdrip.GcmActivity;
+//KS import com.eveningoutpost.dexdrip.Home;
+//KS import com.eveningoutpost.dexdrip.Models.Calibration;
 //KS following are not used on watch
 /*
 import com.eveningoutpost.dexdrip.Services.SyncService;
@@ -38,15 +46,9 @@ import com.eveningoutpost.dexdrip.utils.BgToSpeech;
 import com.eveningoutpost.dexdrip.wearintegration.WatchUpdaterService;
 import com.eveningoutpost.dexdrip.xDripWidget;
 */
-import com.google.android.gms.wearable.DataMap;
-
-import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
 
 /**
- * Created by stephenblack on 11/7/14.
+ * Created by Emma Black on 11/7/14.
  */
 @Table(name = "BgSendQueue", id = BaseColumns._ID)
 public class BgSendQueue extends Model {
@@ -105,8 +107,11 @@ public class BgSendQueue extends Model {
         PowerManager powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         PowerManager.WakeLock wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
                 "sendQueue");
-        wakeLock.acquire();
+        wakeLock.acquire(120000);
         try {
+
+            CustomComplicationProviderService.refresh();
+
             if (!is_follower) addToQueue(bgReading, operation_type);
 
             SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
@@ -235,7 +240,8 @@ public class BgSendQueue extends Model {
                 Log.d("BgSendQueue", "handleNewBgReading Broadcast BG data to watch");
                 resendData(context);
                 if (prefs.getBoolean("force_wearG5", false)) {
-                    ListenerService.requestData(context);
+                    //ListenerService.requestData(context);//Gets called by watchface in missedReadingAlert so not needed here
+                    ListenerService.SendData(context, ListenerService.SYNC_ALL_DATA, null);//Do not need to request data from phone using requestData which performs a resend
                 }
             }
 
@@ -249,14 +255,23 @@ public class BgSendQueue extends Model {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
 
         if (prefs.getBoolean("enable_wearG5", false) && prefs.getBoolean("force_wearG5", false)) {
-            ListenerService.requestData(context);
+            //ListenerService.requestData(context);
+            ListenerService.SendData(context, ListenerService.SYNC_ALL_DATA, null);
         }
     }
 
+    public static void resendData(Context context) {
+        final int battery = BgSendQueue.getBatteryLevel(context.getApplicationContext());
+        resendData(context, battery);
+    }
+
     //KS start from WatchUpdaterService
-    public static void resendData(Context context) {//KS
+    public static void resendData(Context context, int battery) {//KS
+        Log.d("BgSendQueue", "resendData enter battery=" + battery);
         long startTime = new Date().getTime() - (60000 * 60 * 24);
-        Log.d("BgSendQueue", "resendData enter");
+        Intent messageIntent = new Intent();
+        messageIntent.setAction(Intent.ACTION_SEND);
+        messageIntent.putExtra("message", "ACTION_G5BG");
 
         BgReading last_bg = BgReading.last();
         if (last_bg != null) {
@@ -269,27 +284,64 @@ public class BgSendQueue extends Model {
             Log.d("BgSendQueue", "resendData graph_bgs size=" + graph_bgs.size());
             final ArrayList<DataMap> dataMaps = new ArrayList<>(graph_bgs.size());
             SharedPreferences sharedPrefs = PreferenceManager.getDefaultSharedPreferences(context.getApplicationContext());
-            DataMap entries = dataMap(last_bg, sharedPrefs, bgGraphBuilder, context);
+            DataMap entries = dataMap(last_bg, sharedPrefs, bgGraphBuilder, context, battery);
             for (BgReading bg : graph_bgs) {
-                dataMaps.add(dataMap(bg, sharedPrefs, bgGraphBuilder, context));
+                dataMaps.add(dataMap(bg, sharedPrefs, bgGraphBuilder, context, battery));
             }
             entries.putDataMapArrayList("entries", dataMaps);
+            if (sharedPrefs.getBoolean("extra_status_line", false)) {
+                //messageIntent.putExtra("extra_status_line", extraStatusLine(sharedPrefs));
+                entries.putString("extra_status_line", extraStatusLine(sharedPrefs));
+            }
             Log.d("BgSendQueue", "resendData entries=" + entries);
-
-            Intent messageIntent = new Intent();
-            messageIntent.setAction(Intent.ACTION_SEND);
-            messageIntent.putExtra("message", "ACTION_G5BG");
             messageIntent.putExtra("data", entries.toBundle());
+
+            DataMap stepsDataMap = getSensorSteps(sharedPrefs);
+            if (stepsDataMap != null) {
+                messageIntent.putExtra("steps", stepsDataMap.toBundle());
+            }
             LocalBroadcastManager.getInstance(context).sendBroadcast(messageIntent);
         }
     }
 
-    private static DataMap dataMap(BgReading bg, SharedPreferences sPrefs, BgGraphBuilder bgGraphBuilder, Context context) {//KS
+    public static DataMap getSensorSteps(SharedPreferences prefs) {
+        Log.d("BgSendQueue", "getSensorSteps");
+        DataMap dataMap = new DataMap();
+        final long t = System.currentTimeMillis();
+        final PebbleMovement pm = PebbleMovement.last();
+        final boolean show_steps = prefs.getBoolean("showSteps", true);
+        final boolean show_heart_rate = prefs.getBoolean("showHeartRate", true);
+        final boolean use_wear_health = prefs.getBoolean("use_wear_health", true);
+        if (use_wear_health || show_steps) {
+            boolean sameDay = pm != null ? ListenerService.isSameDay(t, pm.timestamp) : false;
+            if (!sameDay) {
+                dataMap.putInt("steps", 0);
+                dataMap.putLong("steps_timestamp", t);
+                Log.d("BgSendQueue", "getSensorSteps isSameDay false t=" + JoH.dateTimeText(t));
+            }
+            else {
+                dataMap.putInt("steps", pm.metric);
+                dataMap.putLong("steps_timestamp", pm.timestamp);
+                Log.d("BgSendQueue", "getSensorSteps isSameDay true pm.timestamp=" + JoH.dateTimeText(pm.timestamp) + " metric=" + pm.metric);
+            }
+        }
+
+        if (use_wear_health && show_heart_rate) {
+            final HeartRate lastHeartRateReading = HeartRate.last();
+            if (lastHeartRateReading != null) {
+                dataMap.putInt("heart_rate", lastHeartRateReading.bpm);
+                dataMap.putLong("heart_rate_timestamp", lastHeartRateReading.timestamp);
+            }
+        }
+        return dataMap;
+    }
+
+    private static DataMap dataMap(BgReading bg, SharedPreferences sPrefs, BgGraphBuilder bgGraphBuilder, Context context, int battery) {//KS
         Double highMark = Double.parseDouble(sPrefs.getString("highValue", "140"));
         Double lowMark = Double.parseDouble(sPrefs.getString("lowValue", "60"));
         DataMap dataMap = new DataMap();
 
-        int battery = BgSendQueue.getBatteryLevel(context.getApplicationContext());
+        //int battery = BgSendQueue.getBatteryLevel(context.getApplicationContext());
 
         dataMap.putString("sgvString", bgGraphBuilder.unitized_string(bg.calculated_value));
         dataMap.putString("slopeArrow", bg.slopeArrow());
@@ -301,8 +353,12 @@ public class BgSendQueue extends Model {
         dataMap.putDouble("sgvDouble", bg.calculated_value);
         dataMap.putDouble("high", inMgdl(highMark, sPrefs));
         dataMap.putDouble("low", inMgdl(lowMark, sPrefs));
+        dataMap.putInt("bridge_battery", sPrefs.getInt("bridge_battery", -1));//Used in DexCollectionService
         //TODO: Add raw again
         //dataMap.putString("rawString", threeRaw((prefs.getString("units", "mgdl").equals("mgdl"))));
+        //if (sPrefs.getBoolean("extra_status_line", false)) {
+        //    dataMap.putString("extra_status_line", extraStatusLine(sPrefs));
+        //}
         return dataMap;
     }
 
@@ -355,5 +411,156 @@ public class BgSendQueue extends Model {
             return 50;
         }
         return (int) (((float) level / (float) scale) * 100.0f);
+    }
+
+    @NonNull
+    public static String extraStatusLine(SharedPreferences prefs) {
+
+        if ((prefs == null) && (xdrip.getAppContext() != null)) {
+            prefs = PreferenceManager.getDefaultSharedPreferences(xdrip.getAppContext());
+        }
+        if (prefs==null) return "";
+
+        final StringBuilder extraline = new StringBuilder();
+        final Calibration lastCalibration = Calibration.lastValid();
+        if (prefs.getBoolean("status_line_calibration_long", false) && lastCalibration != null) {
+            if (extraline.length() != 0) extraline.append(' ');
+            extraline.append("slope = ");
+            extraline.append(String.format("%.2f", lastCalibration.slope));
+            extraline.append(' ');
+            extraline.append("inter = ");
+            extraline.append(String.format("%.2f", lastCalibration.intercept));
+        }
+
+        if (prefs.getBoolean("status_line_calibration_short", false) && lastCalibration != null) {
+            if (extraline.length() != 0) extraline.append(' ');
+            extraline.append("s:");
+            extraline.append(String.format("%.2f", lastCalibration.slope));
+            extraline.append(' ');
+            extraline.append("i:");
+            extraline.append(String.format("%.2f", lastCalibration.intercept));
+        }
+
+        if (prefs.getBoolean("status_line_avg", false)
+                || prefs.getBoolean("status_line_a1c_dcct", false)
+                || prefs.getBoolean("status_line_a1c_ifcc", false)
+                || prefs.getBoolean("status_line_in", false)
+                || prefs.getBoolean("status_line_high", false)
+                || prefs.getBoolean("status_line_low", false)
+                || prefs.getBoolean("status_line_stdev", false)
+                || prefs.getBoolean("status_line_carbs", false)
+                || prefs.getBoolean("status_line_insulin", false)
+                || prefs.getBoolean("status_line_royce_ratio", false)
+                || prefs.getBoolean("status_line_accuracy", false)
+                || prefs.getBoolean("status_line_capture_percentage", false)) {
+
+            final StatsResult statsResult = new StatsResult(prefs, Pref.getBooleanDefaultFalse("extra_status_stats_24h"));
+
+            if (prefs.getBoolean("status_line_avg", false)) {
+                if (extraline.length() != 0) extraline.append(' ');
+                extraline.append(statsResult.getAverageUnitised());
+            }
+            if (prefs.getBoolean("status_line_a1c_dcct", false)) {
+                if (extraline.length() != 0) extraline.append(' ');
+                extraline.append(statsResult.getA1cDCCT());
+            }
+            if (prefs.getBoolean("status_line_a1c_ifcc", false)) {
+                if (extraline.length() != 0) extraline.append(' ');
+                extraline.append(statsResult.getA1cIFCC());
+            }
+            if (prefs.getBoolean("status_line_in", false)) {
+                if (extraline.length() != 0) extraline.append(' ');
+                extraline.append(statsResult.getInPercentage());
+            }
+            if (prefs.getBoolean("status_line_high", false)) {
+                if (extraline.length() != 0) extraline.append(' ');
+                extraline.append(statsResult.getHighPercentage());
+            }
+            if (prefs.getBoolean("status_line_low", false)) {
+                if (extraline.length() != 0) extraline.append(' ');
+                extraline.append(statsResult.getLowPercentage());
+            }
+            if (prefs.getBoolean("status_line_stdev", false)) {
+                if (extraline.length() != 0) extraline.append(' ');
+                extraline.append(statsResult.getStdevUnitised());
+            }
+            if (prefs.getBoolean("status_line_carbs", false) && prefs.getBoolean("show_wear_treatments", false)) {
+                if (extraline.length() != 0 && extraline.charAt(extraline.length()-1) != ' ') extraline.append(' ');
+                //extraline.append("Carbs: " + statsResult.getTotal_carbs());
+                double carbs = statsResult.getTotal_carbs();
+                extraline.append(carbs == -1 ? "" : "Carbs:" + carbs);
+                Log.d("BgSendQueue", "extraStatusLine carbs=" + carbs);
+            }
+            else
+                Log.d("BgSendQueue", "extraStatusLine getTotal_carbs=-1");
+
+            if (prefs.getBoolean("status_line_insulin", false) && prefs.getBoolean("show_wear_treatments", false)) {
+                if (extraline.length() != 0 && extraline.charAt(extraline.length()-1) != ' ') extraline.append(' ');
+                double insulin = statsResult.getTotal_insulin();
+                extraline.append(insulin == -1 ? "" : "U:" + JoH.qs(insulin, 2));
+            }
+            if (prefs.getBoolean("status_line_royce_ratio", false) && prefs.getBoolean("show_wear_treatments", false)) {
+                if (extraline.length() != 0 && extraline.charAt(extraline.length()-1) != ' ') extraline.append(' ');
+                double ratio = statsResult.getRatio();
+                extraline.append(ratio == -1 ? "" : "C/I:" + JoH.qs(ratio, 2));
+            }
+            if (prefs.getBoolean("status_line_capture_percentage", false)) {
+                if (extraline.length() != 0 && extraline.charAt(extraline.length()-1) != ' ') extraline.append(' ');
+                final String accuracy = null;//KS TODO = BloodTest.evaluateAccuracy(WEEK_IN_MS);
+                extraline.append(statsResult.getCapturePercentage(false) + ((accuracy != null) ? " " + accuracy : ""));
+            }
+            /*TODO if (prefs.getBoolean("status_line_accuracy", false)) {
+                final long accuracy_period = DAY_IN_MS * 3;
+                if (extraline.length() != 0) extraline.append(' ');
+                final String accuracy_report = Accuracy.evaluateAccuracy(accuracy_period);
+                if ((accuracy_report != null) && (accuracy_report.length() > 0)) {
+                    extraline.append(accuracy_report);
+                } else {
+                    final String accuracy = BloodTest.evaluateAccuracy(accuracy_period);
+                    extraline.append(((accuracy != null) ? " " + accuracy : ""));
+                }
+            }*/
+        }
+        /* //KS TODO
+        if (prefs.getBoolean("extra_status_calibration_plugin", false)) {
+            final CalibrationAbstract plugin = getCalibrationPluginFromPreferences(); // make sure do this only once
+            if (plugin != null) {
+                final CalibrationAbstract.CalibrationData pcalibration = plugin.getCalibrationData();
+                if (extraline.length() > 0) extraline.append("\n"); // not tested on the widget yet
+                if (pcalibration != null) extraline.append("(" + plugin.getAlgorithmName() + ") s:" + JoH.qs(pcalibration.slope, 2) + " i:" + JoH.qs(pcalibration.intercept, 2));
+                BgReading bgReading = BgReading.last();
+                if (bgReading != null) {
+                    final boolean doMgdl = prefs.getString("units", "mgdl").equals("mgdl");
+                    extraline.append(" \u21D2 " + BgGraphBuilder.unitized_string(plugin.getGlucoseFromSensorValue(bgReading.age_adjusted_raw_value), doMgdl) + " " + BgGraphBuilder.unit(doMgdl));
+                }
+            }
+
+            // If we are using the plugin as the primary then show xdrip original as well
+            if (Pref.getBooleanDefaultFalse("display_glucose_from_plugin") || Pref.getBooleanDefaultFalse("use_pluggable_alg_as_primary")) {
+                final CalibrationAbstract plugin_xdrip = getCalibrationPlugin(PluggableCalibration.Type.xDripOriginal); // make sure do this only once
+                if (plugin_xdrip != null) {
+                    final CalibrationAbstract.CalibrationData pcalibration = plugin_xdrip.getCalibrationData();
+                    if (extraline.length() > 0)
+                        extraline.append("\n"); // not tested on the widget yet
+                    if (pcalibration != null)
+                        extraline.append("(" + plugin_xdrip.getAlgorithmName() + ") s:" + JoH.qs(pcalibration.slope, 2) + " i:" + JoH.qs(pcalibration.intercept, 2));
+                    BgReading bgReading = BgReading.last();
+                    if (bgReading != null) {
+                        final boolean doMgdl = prefs.getString("units", "mgdl").equals("mgdl");
+                        extraline.append(" \u21D2 " + BgGraphBuilder.unitized_string(plugin_xdrip.getGlucoseFromSensorValue(bgReading.age_adjusted_raw_value), doMgdl) + " " + BgGraphBuilder.unit(doMgdl));
+                    }
+                }
+            }
+
+        }
+
+        if (prefs.getBoolean("status_line_time", false)) {
+            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm");
+            if (extraline.length() != 0) extraline.append(' ');
+            extraline.append(sdf.format(new Date()));
+        }
+        */
+        return extraline.toString();
+
     }
 }

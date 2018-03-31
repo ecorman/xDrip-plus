@@ -30,6 +30,7 @@ import android.util.Log;
 import com.eveningoutpost.dexdrip.GcmActivity;
 import com.eveningoutpost.dexdrip.GlucoseMeter.CurrentTimeRx;
 import com.eveningoutpost.dexdrip.GlucoseMeter.GlucoseReadingRx;
+import com.eveningoutpost.dexdrip.GlucoseMeter.VerioHelper;
 import com.eveningoutpost.dexdrip.Home;
 import com.eveningoutpost.dexdrip.Models.BloodTest;
 import com.eveningoutpost.dexdrip.Models.Calibration;
@@ -37,7 +38,9 @@ import com.eveningoutpost.dexdrip.Models.JoH;
 import com.eveningoutpost.dexdrip.Models.UserError;
 import com.eveningoutpost.dexdrip.R;
 import com.eveningoutpost.dexdrip.UtilityModels.BgGraphBuilder;
+import com.eveningoutpost.dexdrip.UtilityModels.Constants;
 import com.eveningoutpost.dexdrip.UtilityModels.PersistentStore;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.xdrip;
 
 import java.lang.reflect.Method;
@@ -47,6 +50,10 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
+import static com.eveningoutpost.dexdrip.GlucoseMeter.VerioHelper.VERIO_F7A1_SERVICE;
+import static com.eveningoutpost.dexdrip.GlucoseMeter.VerioHelper.VERIO_F7A2_WRITE;
+import static com.eveningoutpost.dexdrip.GlucoseMeter.VerioHelper.VERIO_F7A3_NOTIFICATION;
+import static com.eveningoutpost.dexdrip.Models.CalibrationRequest.isSlopeFlatEnough;
 import static com.eveningoutpost.dexdrip.UtilityModels.BgGraphBuilder.unitized_string_with_units_static;
 
 /**
@@ -65,6 +72,7 @@ public class BluetoothGlucoseMeter extends Service {
             = "com.eveningoutpost.dexdrip.BLUETOOTH_GLUCOSE_METER_SERVICE_UPDATE";
     public final static String ACTION_BLUETOOTH_GLUCOSE_METER_NEW_SCAN_DEVICE
             = "com.eveningoutpost.dexdrip.BLUETOOTH_GLUCOSE_METER_NEW_SCAN_DEVICE";
+    public final static String BLUETOOTH_GLUCOSE_METER_TAG = "Bluetooth Glucose Meter";
 
     private final static String TAG = BluetoothGlucoseMeter.class.getSimpleName();
 
@@ -98,11 +106,15 @@ public class BluetoothGlucoseMeter extends Service {
 
     private static final long SCAN_PERIOD = 10000;
 
+    private static boolean await_acks = false;
+    public static boolean awaiting_ack = false;
+    public static boolean awaiting_data = false;
+
     private static int bondingstate = -1;
     private static long started_at = -1;
 
     private static BluetoothAdapter mBluetoothAdapter;
-    private static String mBluetoothDeviceAddress;
+    public static String mBluetoothDeviceAddress;
     private static String mLastConnectedDeviceAddress;
     private static String mLastManufacturer = "";
     private static BluetoothGatt mBluetoothGatt;
@@ -181,6 +193,13 @@ public class BluetoothGlucoseMeter extends Service {
                     Log.d(TAG, "Device is already bonded - good");
                 }
 
+                if (d) {
+                    List<BluetoothGattService> gatts = getSupportedGattServices();
+                    for (BluetoothGattService bgs : gatts) {
+                        Log.d(TAG, "DEBUG: " + bgs.getUuid());
+                    }
+                }
+
                 if (queue.isEmpty()) {
                     statusUpdate("Requesting data from meter");
                     Bluetooth_CMD.read(DEVICE_INFO_SERVICE, MANUFACTURER_NAME, "get device manufacturer");
@@ -220,13 +239,19 @@ public class BluetoothGlucoseMeter extends Service {
             }
         }
 
+
         @Override
         public void onCharacteristicWrite(BluetoothGatt gatt,
                                           BluetoothGattCharacteristic characteristic,
                                           int status) {
             Log.d(TAG, "Written to: " + characteristic.getUuid() + " getvalue: " + JoH.bytesToHex(characteristic.getValue()) + " status: " + status);
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Bluetooth_CMD.poll_queue();
+                if (ack_blocking()) {
+                    if (d)
+                        Log.d(TAG, "Awaiting ACK before next command: " + awaiting_ack + ":" + awaiting_data);
+                } else {
+                    Bluetooth_CMD.poll_queue();
+                }
             } else {
                 Log.e(TAG, "Got gatt write failure: " + status);
                 Bluetooth_CMD.retry_last_command(status);
@@ -252,11 +277,29 @@ public class BluetoothGlucoseMeter extends Service {
                     UserError.Log.d(TAG, "Manufacturer Name: " + mLastManufacturer);
                     statusUpdate("Device from: " + mLastManufacturer);
 
+                    await_acks = false; // reset
+
                     // Roche Aviva Connect uses a DateTime characteristic instead
                     if (mLastManufacturer.startsWith("Roche")) {
                         Bluetooth_CMD.transmute_command(CURRENT_TIME_SERVICE, TIME_CHARACTERISTIC,
                                 GLUCOSE_SERVICE, DATE_TIME_CHARACTERISTIC);
                     }
+
+                    // LifeScan Verio Flex
+                    if (mLastManufacturer.startsWith("LifeScan")) {
+
+                        await_acks = true;
+
+                        Bluetooth_CMD.empty_queue(); // Verio Flex isn't standards compliant
+
+                        Bluetooth_CMD.notify(VERIO_F7A1_SERVICE, VERIO_F7A3_NOTIFICATION, "verio general notification");
+                        Bluetooth_CMD.enable_notification_value(VERIO_F7A1_SERVICE, VERIO_F7A3_NOTIFICATION, "verio general notify value");
+                        Bluetooth_CMD.write(VERIO_F7A1_SERVICE, VERIO_F7A2_WRITE, VerioHelper.getTimeCMD(), "verio ask time");
+                        Bluetooth_CMD.write(VERIO_F7A1_SERVICE, VERIO_F7A2_WRITE, VerioHelper.getTcounterCMD(), "verio T data query"); // don't change order with R
+                        Bluetooth_CMD.write(VERIO_F7A1_SERVICE, VERIO_F7A2_WRITE, VerioHelper.getRcounterCMD(), "verio R data query"); // don't change order with T
+
+                    }
+
                 } else {
                     Log.d(TAG, "Got a different charactersitic! " + characteristic.getUuid().toString());
 
@@ -333,7 +376,7 @@ public class BluetoothGlucoseMeter extends Service {
     }
 
     private static boolean playSounds() {
-        return Home.getPreferencesBoolean("bluetooth_meter_play_sounds", true);
+        return Pref.getBoolean("bluetooth_meter_play_sounds", true);
     }
 
     private synchronized static void forgetDevice(String address) {
@@ -443,6 +486,7 @@ public class BluetoothGlucoseMeter extends Service {
         } catch (Exception e) {
             Log.e(TAG, "Error unregistering pairing receiver: " + e);
         }
+        started_at = -1;
     }
 
     public void startup() {
@@ -453,6 +497,8 @@ public class BluetoothGlucoseMeter extends Service {
     // robustly discover device services
     private synchronized void discover_services() {
         UserError.Log.d(TAG, "discover_services()");
+        awaiting_data = false; // reset
+        awaiting_ack = false;
         services_discovered = false;
         service_discovery_count++;
         if (mBluetoothGatt != null) {
@@ -495,7 +541,7 @@ public class BluetoothGlucoseMeter extends Service {
         return false;
     }
 
-    private static void statusUpdate(String status) {
+    public static void statusUpdate(String status) {
         broadcastUpdate(ACTION_BLUETOOTH_GLUCOSE_METER_SERVICE_UPDATE, status);
         UserError.Log.d(TAG, "StatusUpdate: " + status);
     }
@@ -506,12 +552,29 @@ public class BluetoothGlucoseMeter extends Service {
         LocalBroadcastManager.getInstance(xdrip.getAppContext()).sendBroadcast(intent);
     }
 
+    private static boolean ack_blocking() {
+        final boolean result = await_acks && (awaiting_ack || awaiting_data);
+        if (result) {
+            if (d) Log.d(TAG, "Ack blocking: " + awaiting_ack + ":" + awaiting_data);
+        }
+        return result;
+    }
+
+    private synchronized void markDeviceAsSuccessful(BluetoothGatt gatt) {
+        if (!Pref.getStringDefaultBlank("selected_bluetooth_meter_address").equals(mLastConnectedDeviceAddress)) {
+            Pref.setString("selected_bluetooth_meter_address", mLastConnectedDeviceAddress);
+            Pref.setString("selected_bluetooth_meter_info", mLastManufacturer + "   " + mLastConnectedDeviceAddress);
+            Pref.setBoolean("bluetooth_meter_enabled", true); // auto-enable the setting
+            JoH.static_toast_long("Success with: " + mLastConnectedDeviceAddress + "  Enabling auto-start");
+            if (gatt != null) sendDeviceUpdate(gatt.getDevice(), true); // force update
+        }
+    }
+
     private synchronized void processCharacteristicChange(final BluetoothGatt gatt, final BluetoothGattCharacteristic characteristic) {
 
         // extra debug
         if (d) {
-            UserError.Log.d(TAG, "charactersiticChanged: " + characteristic.getUuid().toString());
-            UserError.Log.d(TAG, JoH.bytesToHex(characteristic.getValue()));
+            UserError.Log.d(TAG, "charactersiticChanged: " + characteristic.getUuid().toString() + " " + JoH.bytesToHex(characteristic.getValue()));
         }
 
         if (GLUCOSE_CHARACTERISTIC.equals(characteristic.getUuid())) {
@@ -521,20 +584,14 @@ public class BluetoothGlucoseMeter extends Service {
             if (ct == null) {
                 statusUpdate("Cannot process glucose record as we do not know device time!");
             } else {
-                if (!Home.getPreferencesStringDefaultBlank("selected_bluetooth_meter_address").equals(mLastConnectedDeviceAddress)) {
-                    Home.setPreferencesString("selected_bluetooth_meter_address", mLastConnectedDeviceAddress);
-                    Home.setPreferencesString("selected_bluetooth_meter_info", mLastManufacturer + "   " + mLastConnectedDeviceAddress);
-                    Home.setPreferencesBoolean("bluetooth_meter_enabled", true); // auto-enable the setting
-                    JoH.static_toast_long("Success with: " + mLastConnectedDeviceAddress + "  Enabling auto-start");
-                    sendDeviceUpdate(gatt.getDevice(), true); // force update
-                }
+                markDeviceAsSuccessful(gatt);
                 statusUpdate("Glucose Record: " + JoH.dateTimeText((gtb.time - ct.timediff) + gtb.offsetMs()) + "\n" + unitized_string_with_units_static(gtb.mgdl));
 
                 if (playSounds() && JoH.ratelimit("bt_meter_data_in", 1))
                     JoH.playResourceAudio(R.raw.bt_meter_data_in);
 
                 if ((!ignore_control_solution_tests) || (gtb.sampleType != 10)) {
-                    final BloodTest bt = BloodTest.create((gtb.time - ct.timediff) + gtb.offsetMs(), gtb.mgdl, "Bluetooth Glucose Meter:\n" + mLastManufacturer + "   " + mLastConnectedDeviceAddress);
+                    final BloodTest bt = BloodTest.create((gtb.time - ct.timediff) + gtb.offsetMs(), gtb.mgdl, BLUETOOTH_GLUCOSE_METER_TAG + ":\n" + mLastManufacturer + "   " + mLastConnectedDeviceAddress);
                     if (bt != null) {
                         UserError.Log.d(TAG, "Successfully created new BloodTest: " + bt.toS());
                         bt.glucoseReadingRx = gtb; // add reference
@@ -551,13 +608,52 @@ public class BluetoothGlucoseMeter extends Service {
                         }, 1000);
 
                     } else {
-                        if (d) UserError.Log.d(TAG, "Failed to greate BloodTest record");
+                        if (d) UserError.Log.d(TAG, "Failed to create BloodTest record");
                     }
                 } else {
                     UserError.Log.d(TAG, "Ignoring control solution test");
                 }
             }
 
+        } else if (RECORDS_CHARACTERISTIC.equals(characteristic.getUuid())) {
+            UserError.Log.d(TAG, "Change notification for RECORDS: " + JoH.bytesToHex(characteristic.getValue()));
+        } else if (CONTEXT_CHARACTERISTIC.equals(characteristic.getUuid())) {
+            UserError.Log.d(TAG, "Change notification for CONTEXT: " + JoH.bytesToHex(characteristic.getValue()));
+        } else if (VERIO_F7A3_NOTIFICATION.equals(characteristic.getUuid())) {
+            UserError.Log.d(TAG, "Change notification for VERIO: " + JoH.bytesToHex(characteristic.getValue()));
+            try {
+                final GlucoseReadingRx gtb = VerioHelper.parseMessage(characteristic.getValue());
+                if (gtb != null) {
+                    // if this was a BG reading we could process (offset already pre-calculated in time) - not robust against meter clock changes
+                    markDeviceAsSuccessful(gatt);
+                    statusUpdate("Glucose Record: " + JoH.dateTimeText((gtb.time + gtb.offsetMs())) + "\n" + unitized_string_with_units_static(gtb.mgdl));
+
+                    if (playSounds() && JoH.ratelimit("bt_meter_data_in", 1))
+                        JoH.playResourceAudio(R.raw.bt_meter_data_in);
+                    final BloodTest bt = BloodTest.create((gtb.time) + gtb.offsetMs(), gtb.mgdl, BLUETOOTH_GLUCOSE_METER_TAG + ":\n" + mLastManufacturer + "   " + mLastConnectedDeviceAddress);
+                    if (bt != null) {
+                        UserError.Log.d(TAG, "Successfully created new BloodTest: " + bt.toS());
+                        bt.glucoseReadingRx = gtb; // add reference
+                        lastBloodTest = bt;
+
+                        final long record_time = lastBloodTest.timestamp;
+                        JoH.runOnUiThreadDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (lastBloodTest.timestamp == record_time) {
+                                    ct = new CurrentTimeRx(); // zero hack
+                                    evaluateLastRecords();
+                                }
+                            }
+                        }, 1000);
+
+                    } else {
+                        if (d) UserError.Log.d(TAG, "Failed to create BloodTest record");
+                    }
+                }
+            } catch (Exception e) {
+                UserError.Log.wtf(TAG, "Got exception processing Verio data " + e);
+            }
         } else {
             UserError.Log.e(TAG, "Unknown characteristic change: " + characteristic.getUuid().toString() + " " + JoH.bytesToHex(characteristic.getValue()));
         }
@@ -570,12 +666,16 @@ public class BluetoothGlucoseMeter extends Service {
         }
     };
 
+    public static void verioScheduleRequestBg(int r) {
+        Bluetooth_CMD.write(VERIO_F7A1_SERVICE, VERIO_F7A2_WRITE, VerioHelper.getRecordCMD(r), "verio get record " + r); // wording used to update request counter
+    }
 
     // decide what to do with newest data
     private synchronized void evaluateLastRecords() {
         if (lastBloodTest != null) {
             GcmActivity.syncBloodTests();
 
+            final boolean delay_calibration = true;
             final GlucoseReadingRx lastGlucoseRecord = lastBloodTest.glucoseReadingRx;
             if ((lastGlucoseRecord != null) && (lastGlucoseRecord.device != null) && (ct != null)) {
                 final String sequence_id = "last-btm-sequence-" + lastGlucoseRecord.device;
@@ -588,10 +688,11 @@ public class BluetoothGlucoseMeter extends Service {
                         PersistentStore.setLong(timestamp_id, lastBloodTest.timestamp);
                         Log.d(TAG, "evaluateLastRecords: appears to be a new record: sequence:" + lastGlucoseRecord.sequence);
 
-                        if (Home.getPreferencesBooleanDefaultFalse("bluetooth_meter_for_calibrations")) {
+                        if (Pref.getBooleanDefaultFalse("bluetooth_meter_for_calibrations")
+                                || Pref.getBooleanDefaultFalse("bluetooth_meter_for_calibrations_auto")) {
                             final long time_since = JoH.msSince(lastBloodTest.timestamp);
                             if (time_since >= 0) {
-                                if (time_since < (12 * 60 * 60 * 1000)) {
+                                if (time_since < (12 * Constants.HOUR_IN_MS)) {
                                     final Calibration calibration = Calibration.lastValid();
                                     // check must also be younger than most recent calibration
                                     if ((calibration == null) || (lastBloodTest.timestamp > calibration.timestamp)) {
@@ -603,7 +704,31 @@ public class BluetoothGlucoseMeter extends Service {
                                             public void run() {
                                                 Home.staticRefreshBGCharts();
                                                 // requires offset in past
-                                                Home.startHomeWithExtra(xdrip.getAppContext(), Home.BLUETOOTH_METER_CALIBRATION, BgGraphBuilder.unitized_string_static(lastBloodTest.mgdl), Long.toString(time_since));
+
+                                                if ((Pref.getBooleanDefaultFalse("bluetooth_meter_for_calibrations_auto") && isSlopeFlatEnough())) {
+                                                    Log.d(TAG, "Slope flat enough for auto calibration");
+                                                    if (!delay_calibration) {
+                                                        Home.startHomeWithExtra(xdrip.getAppContext(),
+                                                                Home.BLUETOOTH_METER_CALIBRATION,
+                                                                BgGraphBuilder.unitized_string_static(lastBloodTest.mgdl),
+                                                                Long.toString(time_since),
+                                                                "auto");
+                                                    } else {
+                                                        Log.d(TAG, "Delaying calibration for later");
+                                                        JoH.static_toast_long("Waiting for 15 minutes more sensor data for calibration");
+                                                    }
+                                                } else {
+                                                    if (Pref.getBooleanDefaultFalse("bluetooth_meter_for_calibrations")) {
+                                                        // manual calibration
+                                                        Home.startHomeWithExtra(xdrip.getAppContext(),
+                                                                Home.BLUETOOTH_METER_CALIBRATION,
+                                                                BgGraphBuilder.unitized_string_static(lastBloodTest.mgdl),
+                                                                Long.toString(time_since),
+                                                                "manual");
+                                                    } else {
+                                                        Log.d(TAG, "Not flat enough slope for auto calibration and manual calibration not enabled");
+                                                    }
+                                                }
                                             }
                                         }, 500);
                                     } else {
@@ -830,12 +955,28 @@ public class BluetoothGlucoseMeter extends Service {
     public static void immortality() {
         if (started_at == -1) {
             startIfEnabled();
+        } else {
+            startIfNoRecentData();
+        }
+    }
+
+    public static void startIfNoRecentData() {
+        if (JoH.quietratelimit("bluetooth-recent-check", 1800)) {
+            if (Pref.getBoolean("bluetooth_meter_enabled", false)) {
+                final List<BloodTest> btl = BloodTest.lastMatching(1, BLUETOOTH_GLUCOSE_METER_TAG + "%");
+                if ((btl == null) || (btl.size() == 0) || (JoH.msSince(btl.get(0).created_timestamp) > Constants.HOUR_IN_MS * 6)) {
+                    if (JoH.pratelimit("restart_bluetooth_service", 3600 * 5)) {
+                        UserError.Log.uel(TAG, "Restarting Bluetooth Glucose meter service");
+                        startIfEnabled();
+                    }
+                }
+            }
         }
     }
 
     public static void startIfEnabled() {
-        if (Home.getPreferencesBoolean("bluetooth_meter_enabled", false)) {
-            final String meter_address = Home.getPreferencesStringDefaultBlank("selected_bluetooth_meter_address");
+        if (Pref.getBoolean("bluetooth_meter_enabled", false)) {
+            final String meter_address = Pref.getStringDefaultBlank("selected_bluetooth_meter_address");
             if (meter_address.length() > 5) {
                 if (JoH.pratelimit("bluetooth-glucose-immortality", 10)) {
                     UserError.Log.d(TAG, "Starting Service");
@@ -859,7 +1000,7 @@ public class BluetoothGlucoseMeter extends Service {
         final Intent start_intent = new Intent(xdrip.getAppContext(), BluetoothGlucoseMeter.class);
         if ((connect_address != null) && (connect_address.length() > 0)) {
             if (connect_address.equals("auto")) {
-                connect_address = Home.getPreferencesStringDefaultBlank("selected_bluetooth_meter_address");
+                connect_address = Pref.getStringDefaultBlank("selected_bluetooth_meter_address");
             }
             start_intent.putExtra("service_action", "connect");
             start_intent.putExtra("connect_address", connect_address);
@@ -878,6 +1019,11 @@ public class BluetoothGlucoseMeter extends Service {
             start_intent.putExtra("forget_address", forget_address);
             xdrip.getAppContext().startService(start_intent);
         }
+    }
+
+    public static void sendImmediateData(UUID service, UUID characteristic, byte[] data, String notes) {
+        Log.d(TAG, "Sending immediate data: " + notes);
+        Bluetooth_CMD.process_queue_entry(Bluetooth_CMD.gen_write(service, characteristic, data, notes));
     }
 
     // jamorham bluetooth queue methodology
@@ -905,8 +1051,16 @@ public class BluetoothGlucoseMeter extends Service {
         }
 
         private synchronized static void add_item(String cmd, UUID service, UUID characteristic, byte[] data, String note) {
+            queue.add(gen_item(cmd, service, characteristic, data, note));
+        }
+
+        private static Bluetooth_CMD gen_item(String cmd, UUID service, UUID characteristic, byte[] data, String note) {
             final Bluetooth_CMD btc = new Bluetooth_CMD(cmd, service, characteristic, data, note);
-            queue.add(btc);
+            return btc;
+        }
+
+        private static Bluetooth_CMD gen_write(UUID service, UUID characteristic, byte[] data, String note) {
+            return gen_item("W", service, characteristic, data, note);
         }
 
         private static void write(UUID service, UUID characteristic, byte[] data, String note) {
@@ -921,6 +1075,10 @@ public class BluetoothGlucoseMeter extends Service {
             add_item("N", service, characteristic, new byte[]{0x01}, note);
         }
 
+        private static Bluetooth_CMD gen_notify(UUID service, UUID characteristic, String note) {
+            return gen_item("N", service, characteristic, new byte[]{0x01}, note);
+        }
+
         private static void unnotify(UUID service, UUID characteristic, String note) {
             add_item("U", service, characteristic, new byte[]{0x00}, note);
         }
@@ -931,6 +1089,10 @@ public class BluetoothGlucoseMeter extends Service {
 
         private static void enable_notification_value(UUID service, UUID characteristic, String note) {
             add_item("D", service, characteristic, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, note);
+        }
+
+        private static Bluetooth_CMD gen_enable_notification_value(UUID service, UUID characteristic, String note) {
+            return gen_item("D", service, characteristic, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, note);
         }
 
         private static synchronized void check_queue_age() {
@@ -954,6 +1116,10 @@ public class BluetoothGlucoseMeter extends Service {
             }
         }
 
+        private static synchronized void empty_queue() {
+            queue.clear();
+        }
+
         private static synchronized void transmute_command(final UUID fromService, final UUID fromCharacteristic,
                                                            final UUID toService, final UUID toCharacteristic) {
             try {
@@ -970,6 +1136,49 @@ public class BluetoothGlucoseMeter extends Service {
                 Log.wtf("Got exception in transmute: ", e);
             }
         }
+
+        private static synchronized void replace_command(final UUID fromService, final UUID fromCharacteristic,
+                                                         Bluetooth_CMD btc_replacement) {
+            try {
+                for (Bluetooth_CMD btc : queue) {
+                    if (btc.service.equals(fromService) && btc.characteristic.equals(fromCharacteristic)) {
+                        btc.service = btc_replacement.service;
+                        btc.characteristic = btc_replacement.characteristic;
+                        btc.cmd = btc_replacement.cmd;
+                        btc.data = btc_replacement.data;
+                        btc.note = btc_replacement.note;
+                        Log.d(TAG, "Replaced service: " + fromService + " -> " + btc_replacement.service);
+                        Log.d(TAG, "Replaced charact: " + fromCharacteristic + " -> " + btc_replacement.characteristic);
+                        Log.d(TAG, "Replaced     cmd: " + btc_replacement.cmd);
+                        break; // currently we only ever need to do one so break for speed
+                    }
+                }
+            } catch (Exception e) {
+                Log.wtf("Got exception in replace: ", e);
+            }
+        }
+
+        private static synchronized void insert_after_command(final UUID fromService, final UUID fromCharacteristic,
+                                                              Bluetooth_CMD btc_replacement) {
+
+            final ConcurrentLinkedQueue<Bluetooth_CMD> tmp_queue = new ConcurrentLinkedQueue<>();
+            try {
+                for (Bluetooth_CMD btc : queue) {
+                    tmp_queue.add(btc);
+                    if (btc.service.equals(fromService) && btc.characteristic.equals(fromCharacteristic)) {
+                        if (btc_replacement != null) tmp_queue.add(btc_replacement);
+                        btc_replacement = null; // first only item
+                    }
+                }
+
+                queue.clear();
+                queue.addAll(tmp_queue);
+
+            } catch (Exception e) {
+                Log.wtf("Got exception in insert_after: ", e);
+            }
+        }
+
 
         private synchronized static void poll_queue() {
             poll_queue(false);
@@ -1009,6 +1218,11 @@ public class BluetoothGlucoseMeter extends Service {
                 if (d) Log.d(TAG, "Queue check already scheduled");
             }
 
+            if (ack_blocking()) {
+                if (d) Log.d(TAG, "Queue blocked by awaiting ack");
+                return;
+            }
+
             Bluetooth_CMD btc = queue.poll();
             if (btc != null) {
                 Log.d(TAG, "Processing queue " + btc.cmd + " :: " + btc.note + " :: " + btc.characteristic.toString() + " " + JoH.bytesToHex(btc.data));
@@ -1037,6 +1251,7 @@ public class BluetoothGlucoseMeter extends Service {
             }
         }
 
+
         private static void process_queue_entry(Bluetooth_CMD btc) {
 
             if (mBluetoothAdapter == null || mBluetoothGatt == null) {
@@ -1057,11 +1272,23 @@ public class BluetoothGlucoseMeter extends Service {
                     switch (btc.cmd) {
                         case "W":
                             characteristic.setValue(btc.data);
+                            if (await_acks && (characteristic.getValue().length > 1)) {
+                                awaiting_ack = true;
+                                awaiting_data = true;
+                                if (d) Log.d(TAG, "Setting await ack blocker 1");
+                                if (btc.note.startsWith("verio get record")) { // notify which record we are processing
+                                    VerioHelper.updateRequestedRecord(Integer.parseInt(btc.note.substring(17)));
+                                }
+                            }
                             JoH.runOnUiThreadDelayed(new Runnable() {
                                 @Override
                                 public void run() {
                                     if (!mBluetoothGatt.writeCharacteristic(characteristic)) {
-                                        Log.e(TAG, "Failed in write characteristic");
+                                        Log.d(TAG, "Failed in write characteristic");
+                                        waitFor(150);
+                                        if (!mBluetoothGatt.writeCharacteristic(characteristic)) {
+                                            Log.e(TAG, "Failed second time in write charactersitic");
+                                        }
                                     }
                                 }
                             }, 0);

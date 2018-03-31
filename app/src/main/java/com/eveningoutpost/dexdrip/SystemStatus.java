@@ -20,7 +20,7 @@ import android.widget.TextView;
 
 import com.eveningoutpost.dexdrip.G5Model.Extensions;
 import com.eveningoutpost.dexdrip.G5Model.Transmitter;
-import com.eveningoutpost.dexdrip.ImportedLibraries.dexcom.Constants;
+import com.eveningoutpost.dexdrip.ImportedLibraries.dexcom.Dex_Constants;
 import com.eveningoutpost.dexdrip.Models.ActiveBluetoothDevice;
 import com.eveningoutpost.dexdrip.Models.BgReading;
 import com.eveningoutpost.dexdrip.Models.Calibration;
@@ -28,6 +28,7 @@ import com.eveningoutpost.dexdrip.Models.JoH;
 import com.eveningoutpost.dexdrip.Models.Sensor;
 import com.eveningoutpost.dexdrip.Models.TransmitterData;
 import com.eveningoutpost.dexdrip.Models.UserError.Log;
+import com.eveningoutpost.dexdrip.Services.G5CollectionService;
 import com.eveningoutpost.dexdrip.UtilityModels.CollectionServiceStarter;
 import com.eveningoutpost.dexdrip.utils.ActivityWithMenu;
 
@@ -148,9 +149,9 @@ public class SystemStatus extends ActivityWithMenu {
         } else {
             transmitter_status_view.setText("" + td.sensor_battery_level);
             GcmActivity.requestSensorBatteryUpdate(); // always ask
-            if (td.sensor_battery_level <= Constants.TRANSMITTER_BATTERY_EMPTY) {
+            if (td.sensor_battery_level <= Dex_Constants.TRANSMITTER_BATTERY_EMPTY) {
                 transmitter_status_view.append(" - very low");
-            } else if (td.sensor_battery_level <= Constants.TRANSMITTER_BATTERY_LOW) {
+            } else if (td.sensor_battery_level <= Dex_Constants.TRANSMITTER_BATTERY_LOW) {
                 transmitter_status_view.append(" - low");
                 transmitter_status_view.append("\n(experimental interpretation)");
             } else {
@@ -206,24 +207,27 @@ public class SystemStatus extends ActivityWithMenu {
         }
 
         String collection_method = prefs.getString("dex_collection_method", "BluetoothWixel");
-        if(collection_method.compareTo("DexcomG5") == 0) {
+        if (collection_method.compareTo("DexcomG5") == 0) {
             Transmitter defaultTransmitter = new Transmitter(prefs.getString("dex_txid", "ABCDEF"));
             mBluetoothAdapter = mBluetoothManager.getAdapter();
+            if (mBluetoothAdapter != null) {
+                Set<BluetoothDevice> pairedDevices = mBluetoothAdapter.getBondedDevices();
+                if ((pairedDevices != null) && (pairedDevices.size() > 0)) {
+                    for (BluetoothDevice device : pairedDevices) {
+                        if (device.getName() != null) {
 
-            Set<BluetoothDevice> pairedDevices = mBluetoothAdapter.getBondedDevices();
-            if ((pairedDevices != null) && (pairedDevices.size() > 0)) {
-                for (BluetoothDevice device : pairedDevices) {
-                    if (device.getName() != null) {
+                            String transmitterIdLastTwo = Extensions.lastTwoCharactersOfString(defaultTransmitter.transmitterId);
+                            String deviceNameLastTwo = Extensions.lastTwoCharactersOfString(device.getName());
 
-                        String transmitterIdLastTwo = Extensions.lastTwoCharactersOfString(defaultTransmitter.transmitterId);
-                        String deviceNameLastTwo = Extensions.lastTwoCharactersOfString(device.getName());
+                            if (transmitterIdLastTwo.equals(deviceNameLastTwo)) {
+                                current_device.setText(defaultTransmitter.transmitterId);
+                            }
 
-                        if (transmitterIdLastTwo.equals(deviceNameLastTwo)) {
-                            current_device.setText(defaultTransmitter.transmitterId);
                         }
-
                     }
                 }
+            } else {
+                current_device.setText("No Bluetooth");
             }
         }
     }
@@ -263,28 +267,33 @@ public class SystemStatus extends ActivityWithMenu {
         if(collection_method.compareTo("DexcomG5") == 0) {
             Transmitter defaultTransmitter = new Transmitter(prefs.getString("dex_txid", "ABCDEF"));
             mBluetoothAdapter = mBluetoothManager.getAdapter();
+            if (mBluetoothAdapter != null) {
+                Set<BluetoothDevice> pairedDevices = mBluetoothAdapter.getBondedDevices();
+                if (pairedDevices.size() > 0) {
+                    for (BluetoothDevice device : pairedDevices) {
+                        if (device.getName() != null) {
 
-            Set<BluetoothDevice> pairedDevices = mBluetoothAdapter.getBondedDevices();
-            if (pairedDevices.size() > 0) {
-                for (BluetoothDevice device : pairedDevices) {
-                    if (device.getName() != null) {
+                            String transmitterIdLastTwo = Extensions.lastTwoCharactersOfString(defaultTransmitter.transmitterId);
+                            String deviceNameLastTwo = Extensions.lastTwoCharactersOfString(device.getName());
 
-                        String transmitterIdLastTwo = Extensions.lastTwoCharactersOfString(defaultTransmitter.transmitterId);
-                        String deviceNameLastTwo = Extensions.lastTwoCharactersOfString(device.getName());
+                            if (transmitterIdLastTwo.equals(deviceNameLastTwo)) {
+                                final String fw = G5CollectionService.getFirmwareVersionString(defaultTransmitter.transmitterId);
+                                connection_status.setText(device.getName() + " Authed" + ((fw != null) ? ("\n" + fw) : ""));
+                                break;
+                            }
 
-                        if (transmitterIdLastTwo.equals(deviceNameLastTwo)) {
-                            connection_status.setText(device.getName() + "\nAuthenticated");
                         }
-
                     }
                 }
+            } else {
+                connection_status.setText("No bluetooth");
             }
         }
     }
 
     private void setNotes() {
         try {
-            if (mBluetoothManager == null) {
+            if ((mBluetoothManager == null) || ((android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.JELLY_BEAN_MR2) && (mBluetoothManager.getAdapter() == null))) {
                 notes.append("\n- This device does not seem to support bluetooth");
             } else {
                 if ((android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.JELLY_BEAN_MR2)

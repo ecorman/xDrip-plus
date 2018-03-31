@@ -20,12 +20,16 @@ import com.eveningoutpost.dexdrip.Models.BgReading;
 import com.eveningoutpost.dexdrip.Models.BloodTest;
 import com.eveningoutpost.dexdrip.Models.Calibration;
 import com.eveningoutpost.dexdrip.Models.JoH;
+import com.eveningoutpost.dexdrip.Models.RollCall;
 import com.eveningoutpost.dexdrip.Models.Sensor;
 import com.eveningoutpost.dexdrip.Models.Treatments;
 import com.eveningoutpost.dexdrip.Models.UserError;
 import com.eveningoutpost.dexdrip.Models.UserError.Log;
+import com.eveningoutpost.dexdrip.Services.PlusSyncService;
 import com.eveningoutpost.dexdrip.UtilityModels.Constants;
+import com.eveningoutpost.dexdrip.UtilityModels.InstalledApps;
 import com.eveningoutpost.dexdrip.UtilityModels.PersistentStore;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.utils.CipherUtils;
 import com.eveningoutpost.dexdrip.utils.DisplayQRCode;
 import com.eveningoutpost.dexdrip.utils.SdcardImportExport;
@@ -33,6 +37,8 @@ import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GoogleApiAvailability;
 import com.google.android.gms.gcm.GoogleCloudMessaging;
 import com.google.common.primitives.Bytes;
+import com.google.firebase.messaging.FirebaseMessaging;
+import com.google.firebase.messaging.RemoteMessage;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.Expose;
@@ -48,38 +54,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Created by jamorham on 11/01/16.
  */
-class SensorCalibrations {
-    @Expose
-    Sensor sensor;
-    
-    @Expose
-    List <Calibration> calibrations;
-}
 
-class NewCalibration {
-    @Expose
-    double bgValue; // Always in mgdl
-    
-    @Expose
-    long timestamp;
-    
-    @Expose
-    long offset;
-    
-    @Expose
-    String uuid;
-}
 
-public class GcmActivity extends Activity {
+public class GcmActivity extends FauxActivity {
 
     private static final int PLAY_SERVICES_RESOLUTION_REQUEST = 9000;
-    public static final String TASK_TAG_CHARGING = "charging";
-    public static final String TASK_TAG_UNMETERED = "unmetered";
+    static final String TASK_TAG_CHARGING = "charging";
+    static final String TASK_TAG_UNMETERED = "unmetered";
     private static final String TAG = "jamorham gcmactivity";
     public static double last_sync_request = 0;
     public static double last_sync_fill = 0;
     private static int bg_sync_backoff = 0;
     private static double last_ping_request = 0;
+    private static long last_rlcl_request = 0;
     public static AtomicInteger msgId = new AtomicInteger(1);
     public static String token = null;
     public static String senderid = null;
@@ -87,25 +74,28 @@ public class GcmActivity extends Activity {
     private static final Object queue_lock = new Object();
     private BroadcastReceiver mRegistrationBroadcastReceiver;
     public static boolean cease_all_activity = false;
+    private static boolean cease_all_checked = false;
     public static double last_ack = -1;
     public static double last_send = -1;
     public static double last_send_previous = -1;
     private static final long MAX_ACK_OUTSTANDING_MS = 3600000;
     private static int recursion_depth = 0;
     private static int last_bridge_battery = -1;
+    private static int last_parakeet_battery = -1;
     private static final int MAX_RECURSION = 30;
     private static final int MAX_QUEUE_SIZE = 300;
     private static final int RELIABLE_MAX_PAYLOAD = 1800;
+    private static final int RELIABLE_MAX_BINARY_PAYLOAD = 1400;
     private static final boolean d = false; // debug
 
 
-    public static SensorCalibrations []  getSensorCalibrations(String json) {
+    private static SensorCalibrations[] getSensorCalibrations(String json) {
         SensorCalibrations[] sensorCalibrations = new GsonBuilder().excludeFieldsWithoutExposeAnnotation().create().fromJson(json, SensorCalibrations[].class);
         Log.d(TAG, "After fromjson sensorCalibrations are " + sensorCalibrations.toString());
         return sensorCalibrations;
     }
 
-    public static String sensorAndCalibrationsToJson(Sensor sensor, int limit) {
+    private static String sensorAndCalibrationsToJson(Sensor sensor, int limit) {
         SensorCalibrations[] sensorCalibrations = new SensorCalibrations[1];
         sensorCalibrations[0] = new SensorCalibrations();
         sensorCalibrations[0].sensor = sensor;
@@ -121,42 +111,42 @@ public class GcmActivity extends Activity {
         if (d) Log.d(TAG, "sensorAndCalibrationsToJson created the string " + output);
         return output;
     }
-    
-    public static NewCalibration getNewCalibration(String json) {
-        NewCalibration []newCalibrationArray = new GsonBuilder().excludeFieldsWithoutExposeAnnotation().create().fromJson(json, NewCalibration[].class);
-        if(newCalibrationArray != null) {
+
+    static NewCalibration getNewCalibration(String json) {
+        NewCalibration[] newCalibrationArray = new GsonBuilder().excludeFieldsWithoutExposeAnnotation().create().fromJson(json, NewCalibration[].class);
+        if (newCalibrationArray != null) {
             Log.e(TAG, "After fromjson NewCalibration are " + newCalibrationArray.toString());
         } else {
-            Log.e(TAG,"Error creating newCalibrationArray");
+            Log.e(TAG, "Error creating newCalibrationArray");
             return null;
         }
         return newCalibrationArray[0];
     }
-    
-    public static String newCalibrationToJson(double bgValue, String uuid) {
+
+    private static String newCalibrationToJson(double bgValue, String uuid, long offset) {
         NewCalibration newCalibrationArray[] = new NewCalibration[1];
         NewCalibration newCalibration = new NewCalibration();
         newCalibration.bgValue = bgValue;
         newCalibration.uuid = uuid;
         newCalibration.timestamp = JoH.tsl();
-        newCalibration.offset = 0;
+        newCalibration.offset = offset;
         newCalibrationArray[0] = newCalibration;
-        
+
         Gson gson = new GsonBuilder()
                 .excludeFieldsWithoutExposeAnnotation()
                 .registerTypeAdapter(Date.class, new DateTypeAdapter())
                 .serializeSpecialFloatingPointValues()
                 .create();
-        
-        String output =  gson.toJson(newCalibrationArray);
+
+        String output = gson.toJson(newCalibrationArray);
         Log.d(TAG, "newCalibrationToJson Created the string " + output);
         return output;
     }
 
-    public static void upsertSensorCalibratonsFromJson(String json) {
+    static void upsertSensorCalibratonsFromJson(String json) {
         Log.i(TAG, "upsertSensorCalibratonsFromJson called");
-        SensorCalibrations [] sensorCalibrations = getSensorCalibrations(json);
-        for (SensorCalibrations SensorCalibration : sensorCalibrations ) {
+        SensorCalibrations[] sensorCalibrations = getSensorCalibrations(json);
+        for (SensorCalibrations SensorCalibration : sensorCalibrations) {
             Sensor.upsertFromMaster(SensorCalibration.sensor);
             for (Calibration calibration : SensorCalibration.calibrations) {
                 Log.d(TAG, "upsertSensorCalibratonsFromJson updating calibration " + calibration.uuid);
@@ -164,8 +154,8 @@ public class GcmActivity extends Activity {
             }
         }
     }
-    
-    public static synchronized void queueAction(String reference) {
+
+    static synchronized void queueAction(String reference) {
         synchronized (queue_lock) {
             Log.d(TAG, "Received ACK, Queue Size: " + GcmActivity.gcm_queue.size() + " " + reference);
             last_ack = JoH.ts();
@@ -181,11 +171,11 @@ public class GcmActivity extends Activity {
         }
     }
 
-    public static void queueCheckOld(Context context) {
+    static void queueCheckOld(Context context) {
         queueCheckOld(context, false);
     }
 
-    public static void queueCheckOld(Context context, boolean recursive) {
+    private static void queueCheckOld(Context context, boolean recursive) {
 
         if (context == null) {
             Log.e(TAG, "Can't process old queue as null context");
@@ -228,6 +218,13 @@ public class GcmActivity extends Activity {
         }
     }
 
+    private static void checkCease() {
+        if ((!cease_all_checked) && (!cease_all_activity)) {
+            cease_all_activity = Pref.getBooleanDefaultFalse("disable_all_sync");
+            cease_all_checked = true;
+        }
+    }
+
     private static String sendMessage(final String action, final String payload) {
         return sendMessage(myIdentity(), action, payload);
     }
@@ -237,6 +234,7 @@ public class GcmActivity extends Activity {
     }
 
     private static String sendMessage(final String identity, final String action, final String payload) {
+        checkCease();
         if (cease_all_activity) return null;
         if (identity == null) return null;
         new Thread() {
@@ -249,6 +247,7 @@ public class GcmActivity extends Activity {
     }
 
     private static String sendMessage(final String identity, final String action, final byte[] bpayload) {
+        checkCease();
         if (cease_all_activity) return null;
         if (identity == null) return null;
         new Thread() {
@@ -265,7 +264,7 @@ public class GcmActivity extends Activity {
         if (JoH.ratelimit("gcm-bgs-batch", 15)) {
             GcmActivity.sendMessage("bgs", bgReading.toJSON(true));
         } else {
-            PersistentStore.appendString("gcm-bgs-batch-queue", bgReading.toJSON(false), "^");
+            PersistentStore.appendBytes("gcm-bgs-batch-queue", bgReading.toMessage());
             PersistentStore.setLong("gcm-bgs-batch-time", JoH.tsl());
             processBgsBatch(false);
         }
@@ -288,12 +287,12 @@ public class GcmActivity extends Activity {
     }
 
     private synchronized static void processBgsBatch(boolean send_now) {
-        final String value = PersistentStore.getString("gcm-bgs-batch-queue");
-        Log.d(TAG, "Processing BgsBatch: length: " + value.length() + " now:" + send_now);
-        if ((send_now) || (value.length() > 700)) {
-            if (value.length() > 0) {
+        final byte[] value = PersistentStore.getBytes("gcm-bgs-batch-queue");
+        Log.d(TAG, "Processing BgsBatch: length: " + value.length + " now:" + send_now);
+        if ((send_now) || (value.length > (RELIABLE_MAX_BINARY_PAYLOAD - 100))) {
+            if (value.length > 0) {
                 PersistentStore.setString("gcm-bgs-batch-queue", "");
-                GcmActivity.sendMessage("bgs", value);
+                GcmActivity.sendMessage("bgmm", value);
             }
             Log.d(TAG, "Sent batch");
         } else {
@@ -310,7 +309,7 @@ public class GcmActivity extends Activity {
     }
 
     public static synchronized void syncSensor(Sensor sensor, boolean forceSend) {
-        Log.d(TAG,"syncsensor backtrace: "+JoH.backTrace());
+        Log.d(TAG, "syncsensor backtrace: " + JoH.backTrace());
         Log.i(TAG, "syncSensor called");
         if (sensor == null) {
             Log.e(TAG, "syncSensor sensor is null");
@@ -324,7 +323,8 @@ public class GcmActivity extends Activity {
         // automatically find a suitable volume of payload data
         for (int limit = 9; limit > 0; limit--) {
             final String json = sensorAndCalibrationsToJson(sensor, limit);
-            if (d) Log.d(TAG, "sensor json size: limit: " + limit + " len: " + CipherUtils.compressEncryptString(json).length());
+            if (d)
+                Log.d(TAG, "sensor json size: limit: " + limit + " len: " + CipherUtils.compressEncryptString(json).length());
             if (CipherUtils.compressEncryptString(json).length() <= RELIABLE_MAX_PAYLOAD) {
                 final String json_hash = CipherUtils.getSHA256(json);
                 if (!forceSend || !PersistentStore.getString("last-syncsensor-json").equals(json_hash)) {
@@ -343,20 +343,28 @@ public class GcmActivity extends Activity {
         if ((JoH.ts() - last_ping_request) > (60 * 1000 * 15)) {
             last_ping_request = JoH.ts();
             Log.d(TAG, "Sending ping");
-            if (JoH.pratelimit("gcm-ping",1199)) GcmActivity.sendMessage("ping", "");
+            if (JoH.pratelimit("gcm-ping", 1199)) GcmActivity.sendMessage("ping", new RollCall().toS());
         } else {
             Log.d(TAG, "Already requested ping recently");
         }
     }
 
-    public static void sendLocation(final String location) {
+    public static void requestRollCall() {
+        if (JoH.tsl() - last_rlcl_request > (60 * 1000)) {
+            last_rlcl_request = JoH.tsl();
+            if (JoH.pratelimit("gcm-rlcl", 3600))
+                GcmActivity.sendMessage("rlcl", new RollCall().toS());
+        }
+    }
+
+    static void sendLocation(final String location) {
         if (JoH.pratelimit("gcm-plu", 180)) {
             GcmActivity.sendMessage("plu", location);
         }
     }
 
     public static void sendSensorBattery(final int battery) {
-        if (JoH.pratelimit("gcm-sbu", 300)) {
+        if (JoH.pratelimit("gcm-sbu", 3600)) {
             GcmActivity.sendMessage("sbu", Integer.toString(battery));
         }
     }
@@ -370,6 +378,21 @@ public class GcmActivity extends Activity {
         }
     }
 
+    public static void sendParakeetBattery(final int battery) {
+        if (battery != last_parakeet_battery) {
+            if (JoH.pratelimit("gcm-pbu", 1800)) {
+                GcmActivity.sendMessage("pbu", Integer.toString(battery));
+                last_parakeet_battery = battery;
+            }
+        }
+    }
+
+    public static void sendNotification(String title, String message) {
+        if (JoH.pratelimit("gcm-not", 30)) {
+            GcmActivity.sendMessage("not", title.replaceAll("\\^", "") + "^" + message.replaceAll("\\^", ""));
+        }
+    }
+
     private static void sendRealSnoozeToRemote() {
         if (JoH.pratelimit("gcm-sra", 60)) {
             String wifi_ssid = JoH.getWifiSSID();
@@ -379,9 +402,9 @@ public class GcmActivity extends Activity {
     }
 
     public static void sendSnoozeToRemote() {
-        if ((Home.get_master() || Home.get_follower()) && (Home.getPreferencesBooleanDefaultFalse("send_snooze_to_remote"))
+        if ((Home.get_master() || Home.get_follower()) && (Pref.getBooleanDefaultFalse("send_snooze_to_remote"))
                 && (JoH.pratelimit("gcm-sra-maybe", 5))) {
-            if (Home.getPreferencesBooleanDefaultFalse("confirm_snooze_to_remote")) {
+            if (Pref.getBooleanDefaultFalse("confirm_snooze_to_remote")) {
                 Home.startHomeWithExtra(xdrip.getAppContext(), Home.HOME_FULL_WAKEUP, "1");
                 Home.startHomeWithExtra(xdrip.getAppContext(), Home.SNOOZE_CONFIRM_DIALOG, "");
             } else {
@@ -391,7 +414,7 @@ public class GcmActivity extends Activity {
         }
     }
 
-    public static void sendSnoozeToRemoteWithConfirm(final Context context) {
+    static void sendSnoozeToRemoteWithConfirm(final Context context) {
         final long when = JoH.tsl();
         final AlertDialog.Builder builder = new AlertDialog.Builder(context);
         builder.setTitle("Confirm Remote Snooze");
@@ -417,13 +440,17 @@ public class GcmActivity extends Activity {
         });
         final AlertDialog alert = builder.create();
         alert.show();
-     // Hide after some seconds
-        final Handler handler  = new Handler();
+        // Hide after some seconds
+        final Handler handler = new Handler();
         final Runnable runnable = new Runnable() {
             @Override
             public void run() {
-                if (alert.isShowing()) {
-                    alert.dismiss();
+                try {
+                    if (alert.isShowing()) {
+                        alert.dismiss();
+                    }
+                } catch (IllegalArgumentException e) {
+                    Log.e(TAG, "Got exception trying to auto-dismiss dialog: " + e);
                 }
             }
         };
@@ -436,8 +463,8 @@ public class GcmActivity extends Activity {
         });
 
         handler.postDelayed(runnable, 120000);
-        
-        
+
+
     }
 
     public static void sendMotionUpdate(final long timestamp, final int activity) {
@@ -446,12 +473,17 @@ public class GcmActivity extends Activity {
         }
     }
 
+    public static void sendPumpStatus(String json) {
+        if (JoH.pratelimit("gcm-psu", 180)) {
+            sendMessage("psu", json);
+        }
+    }
 
     public static void requestBGsync() {
         if (token != null) {
             if ((JoH.ts() - last_sync_request) > (60 * 1000 * (5 + bg_sync_backoff))) {
                 last_sync_request = JoH.ts();
-                if (JoH.pratelimit("gcm-bfr",299)) GcmActivity.sendMessage("bfr", "");
+                if (JoH.pratelimit("gcm-bfr", 299)) GcmActivity.sendMessage("bfr", "");
                 bg_sync_backoff++;
             } else {
                 Log.d(TAG, "Already requested BGsync recently, backoff: " + bg_sync_backoff);
@@ -464,12 +496,14 @@ public class GcmActivity extends Activity {
         }
     }
 
-    public static void syncBGTable2() {
+    static void syncBGTable2() {
+        if (!Sensor.isActive()) return;
         new Thread() {
             @Override
             public void run() {
                 final PowerManager.WakeLock wl = JoH.getWakeLock("syncBGTable", 300000);
-                if ((JoH.ts() - last_sync_fill) > (60 * 1000 * (5 + bg_sync_backoff))) {
+                //if ((JoH.ts() - last_sync_fill) > (60 * 1000 * (5 + bg_sync_backoff))) {
+                if (JoH.pratelimit("last-sync-fill", 60 * (5 + bg_sync_backoff))) {
                     last_sync_fill = JoH.ts();
                     bg_sync_backoff++;
 
@@ -507,7 +541,7 @@ public class GcmActivity extends Activity {
         sendMessage("bfb", id + "^" + key);
     }
 
-    public static void processBFPbundle(String bundle) {
+    static void processBFPbundle(String bundle) {
         String[] bundlea = bundle.split("\\^");
         for (String bgr : bundlea) {
             BgReading.bgReadingInsertFromJson(bgr, false);
@@ -516,13 +550,13 @@ public class GcmActivity extends Activity {
         Home.staticRefreshBGCharts();
     }
 
-    public static void requestSensorBatteryUpdate() {
+    static void requestSensorBatteryUpdate() {
         if (Home.get_follower() && JoH.pratelimit("SensorBatteryUpdateRequest", 1200)) {
             Log.d(TAG, "Requesting Sensor Battery Update");
             GcmActivity.sendMessage("sbr", ""); // request sensor battery update
         }
     }
-    
+
     public static void requestSensorCalibrationsUpdate() {
         if (Home.get_follower() && JoH.pratelimit("SensorCalibrationsUpdateRequest", 300)) {
             Log.d(TAG, "Requesting Sensor and calibrations Update");
@@ -531,20 +565,12 @@ public class GcmActivity extends Activity {
     }
 
     public static void pushTreatmentAsync(final Treatments thistreatment) {
-        new Thread() {
-            @Override
-            public void run() {
-                push_treatment(thistreatment);
-            }
-        }.start();
-    }
-
-    private static void push_treatment(Treatments thistreatment) {
-        String json = thistreatment.toJSON();
+        if ((thistreatment.uuid == null) || (thistreatment.uuid.length() < 5)) return;
+        final String json = thistreatment.toJSON();
         sendMessage(myIdentity(), "nt", json);
     }
 
-    public static void send_ping_reply() {
+    static void send_ping_reply() {
         Log.d(TAG, "Sending ping reply");
         sendMessage(myIdentity(), "q", "");
     }
@@ -559,49 +585,52 @@ public class GcmActivity extends Activity {
         sendMessage(myIdentity(), "dt", treatment.uuid);
     }
 
-    public static String myIdentity() {
+    static String myIdentity() {
         // TODO prefs override possible
         return GoogleDriveInterface.getDriveIdentityString();
     }
 
-    public static void pushTreatmentFromPayloadString(String json) {
+    static void pushTreatmentFromPayloadString(String json) {
         if (json.length() < 3) return;
         Log.d(TAG, "Pushing json from GCM: " + json);
         Treatments.pushTreatmentFromJson(json);
     }
 
-    public static void pushCalibration(String bg_value, String seconds_ago) {
+    static void pushCalibration(String bg_value, String seconds_ago) {
         if ((bg_value.length() == 0) || (seconds_ago.length() == 0)) return;
         if (Home.get_master()) {
             // For master, we now send the entire table, no need to send this specific table each time
             return;
         }
-        String currenttime = Double.toString(new Date().getTime());
-        String tosend = currenttime + " " + bg_value + " " + seconds_ago;
-        sendMessage(myIdentity(), "cal", tosend);
-    }
-    
-    public static void pushCalibration2(double bgValue, String uuid) {
-        Log.i(TAG, "pushCalibration2 called");
-
-        final SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(xdrip.getAppContext());
-        final String unit = prefs.getString("units", "mgdl");
-        
-        if (unit.compareTo("mgdl") != 0) {
-            bgValue = bgValue * Constants.MMOLL_TO_MGDL;
+        if (Home.get_follower()) {
+            final String currenttime = Double.toString(new Date().getTime());
+            final String tosend = currenttime + " " + bg_value + " " + seconds_ago;
+            sendMessage(myIdentity(), "cal", tosend);
         }
-        
-        if ((bgValue < 40) || (bgValue > 400)) {
-            Log.wtf(TAG, "Invalid out of range calibration glucose mg/dl value of: " + bgValue);
-            JoH.static_toast_long("Calibration out of range: " + bgValue + " mg/dl");
-            return ;
-        }
-        String json = newCalibrationToJson(bgValue, uuid);
-        GcmActivity.sendMessage(myIdentity(), "cal2", json);
     }
 
-    public static void clearLastCalibration() {
-        sendMessage(myIdentity(), "clc", "");
+    static void pushCalibration2(double bgValue, String uuid, long offset) {
+        Log.i(TAG, "pushCalibration2 called: " + JoH.qs(bgValue, 1) + " " + uuid + " " + offset);
+        if (Home.get_master_or_follower()) {
+            final SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(xdrip.getAppContext());
+            final String unit = prefs.getString("units", "mgdl");
+
+            if (unit.compareTo("mgdl") != 0) {
+                bgValue = bgValue * Constants.MMOLL_TO_MGDL;
+            }
+
+            if ((bgValue < 40) || (bgValue > 400)) {
+                Log.wtf(TAG, "Invalid out of range calibration glucose mg/dl value of: " + bgValue);
+                JoH.static_toast_long("Calibration out of range: " + bgValue + " mg/dl");
+                return;
+            }
+            final String json = newCalibrationToJson(bgValue, uuid, offset);
+            GcmActivity.sendMessage(myIdentity(), "cal2", json);
+        }
+    }
+
+    public static void clearLastCalibration(String uuid) {
+        sendMessage(myIdentity(), "clc", uuid);
     }
 
     private static synchronized String sendMessageNow(String identity, String action, String payload, byte[] bpayload) {
@@ -671,6 +700,7 @@ public class GcmActivity extends Activity {
         switch (action) {
             // one shot action types where multi queuing is not needed
             case "ping":
+            case "rlcl":
             case "sbr":
             case "bfr":
                 synchronized (queue_lock) {
@@ -691,9 +721,33 @@ public class GcmActivity extends Activity {
         }
     }
 
-    public void tryGCMcreate() {
+    private static void fmSend(Bundle data) {
+        final FirebaseMessaging fm = FirebaseMessaging.getInstance();
+        if (senderid != null) {
+            fm.send(new RemoteMessage.Builder(senderid + "@gcm.googleapis.com")
+                    .setMessageId(Integer.toString(msgId.incrementAndGet()))
+                    .setData(JoH.bundleToMap(data))
+                    .build());
+        } else {
+            Log.wtf(TAG, "senderid is null");
+        }
+    }
+
+    private void tryGCMcreate() {
         Log.d(TAG, "try GCMcreate");
+        checkCease();
         if (cease_all_activity) return;
+
+        if (!InstalledApps.isGooglePlayInstalled(xdrip.getAppContext())) {
+            if (JoH.pratelimit("gms-missing-msg", 86400)) {
+                final String msg = "Google Play services - not installed!\nInstall it or disable xDrip+ sync options";
+                JoH.static_toast_long(msg);
+                Home.toaststaticnext(msg);
+            }
+            cease_all_activity = true;
+            return;
+        }
+
         mRegistrationBroadcastReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -710,14 +764,28 @@ public class GcmActivity extends Activity {
             }
         };
 
-        if (checkPlayServices()) {
-            Intent intent = new Intent(this, RegistrationIntentService.class);
-            startService(intent);
+        final Boolean play_result = checkPlayServices();
+        if (play_result == null) {
+            Log.d(TAG, "Indeterminate result for play services");
+            PlusSyncService.backoff_a_lot();
+        } else if (play_result) {
+            final Intent intent = new Intent(xdrip.getAppContext(), RegistrationIntentService.class);
+            xdrip.getAppContext().startService(intent);
         } else {
             cease_all_activity = true;
             final String msg = "ERROR: Connecting to Google Services - check google login or reboot?";
-            JoH.static_toast(this, msg, Toast.LENGTH_LONG);
+            JoH.static_toast_long(msg);
             Home.toaststaticnext(msg);
+        }
+    }
+
+    // for starting FauxActivity
+    public void jumpStart() {
+        Log.d(TAG, "jumpStart() called");
+        if (JoH.ratelimit("gcm-jumpstart", 5)) {
+            onCreate(null);
+        } else {
+            Log.d(TAG, "Ratelimiting jumpstart");
         }
     }
 
@@ -725,7 +793,7 @@ public class GcmActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         try {
             super.onCreate(savedInstanceState);
-            if (Home.getPreferencesBooleanDefaultFalse("disable_all_sync")) {
+            if (Pref.getBooleanDefaultFalse("disable_all_sync")) {
                 cease_all_activity = true;
                 Log.d(TAG, "Sync services disabled");
             }
@@ -750,24 +818,24 @@ public class GcmActivity extends Activity {
     protected void onResume() {
         super.onResume();
         if (cease_all_activity) return;
-        LocalBroadcastManager.getInstance(this).registerReceiver(mRegistrationBroadcastReceiver,
+        LocalBroadcastManager.getInstance(xdrip.getAppContext()).registerReceiver(mRegistrationBroadcastReceiver,
                 new IntentFilter(PreferencesNames.REGISTRATION_COMPLETE));
     }
 
     @Override
     protected void onPause() {
         try {
-            LocalBroadcastManager.getInstance(this).unregisterReceiver(mRegistrationBroadcastReceiver);
+            LocalBroadcastManager.getInstance(xdrip.getAppContext()).unregisterReceiver(mRegistrationBroadcastReceiver);
         } catch (Exception e) {
             Log.e(TAG, "Exception onPause: ", e);
         }
         super.onPause();
     }
 
-    public static void checkSync(final Context context) {
+    static void checkSync(final Context context) {
         if ((GcmActivity.last_ack > -1) && (GcmActivity.last_send_previous > 0)) {
             if (GcmActivity.last_send_previous > GcmActivity.last_ack) {
-                if (Home.getPreferencesLong("sync_warning_never", 0) == 0) {
+                if (Pref.getLong("sync_warning_never", 0) == 0) {
                     if (PreferencesNames.SYNC_VERSION.equals("1") && JoH.isOldVersion(context)) {
                         final double since_send = JoH.ts() - GcmActivity.last_send_previous;
                         if (since_send > 60000) {
@@ -794,7 +862,7 @@ public class GcmActivity extends Activity {
                                             @Override
                                             public void onClick(DialogInterface dialog, int which) {
                                                 dialog.dismiss();
-                                                Home.setPreferencesLong("sync_warning_never", (long) JoH.ts());
+                                                Pref.setLong("sync_warning_never", (long) JoH.ts());
                                             }
                                         });
                                         AlertDialog alert = builder.create();
@@ -815,11 +883,12 @@ public class GcmActivity extends Activity {
      * the Google Play Store or enable it in the device's system settings.
      */
 
-    private boolean checkPlayServices() {
-        return checkPlayServices(this, null);
+    private static Boolean checkPlayServices() {
+        return checkPlayServices(xdrip.getAppContext(), null);
     }
 
-    public static boolean checkPlayServices(Context context, Activity activity) {
+    static Boolean checkPlayServices(Context context, Activity activity) {
+        checkCease();
         if (cease_all_activity) return false;
         final GoogleApiAvailability apiAvailability = GoogleApiAvailability.getInstance();
         int resultCode = apiAvailability.isGooglePlayServicesAvailable(context);
@@ -831,7 +900,9 @@ public class GcmActivity extends Activity {
                                 .show();
                     } else {
                         if (JoH.ratelimit(Home.GCM_RESOLUTION_ACTIVITY, 60)) {
+                            //apiAvailability.showErrorNotification(context, resultCode);
                             Home.startHomeWithExtra(context, Home.GCM_RESOLUTION_ACTIVITY, "1");
+                            return null;
                         } else {
                             Log.e(TAG, "Ratelimit exceeded for " + Home.GCM_RESOLUTION_ACTIVITY);
                         }
@@ -863,5 +934,27 @@ public class GcmActivity extends Activity {
             resent = 0;
         }
     }
+}
+
+class SensorCalibrations {
+    @Expose
+    Sensor sensor;
+
+    @Expose
+    List<Calibration> calibrations;
+}
+
+class NewCalibration {
+    @Expose
+    double bgValue; // Always in mgdl
+
+    @Expose
+    long timestamp;
+
+    @Expose
+    long offset;
+
+    @Expose
+    String uuid;
 }
 

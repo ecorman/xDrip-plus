@@ -13,7 +13,7 @@ import com.eveningoutpost.dexdrip.R;
 import java.util.List;
 
 /**
- * Created by stephenblack on 6/8/15.
+ * Created by Emma Black on 6/8/15.
  */
 public abstract class ActivityWithMenu extends AppCompatActivity implements NavigationDrawerFragment.NavigationDrawerCallbacks {
     private int menu_position;
@@ -45,7 +45,7 @@ public abstract class ActivityWithMenu extends AppCompatActivity implements Navi
         if (position != menu_position) {
             startActivity(intent_list.get(position));
             //do not close activity if it is the Launcher or "Home".
-            if (!getMenuName().equalsIgnoreCase(Home.menu_name)) {
+            if (!getMenuName().equalsIgnoreCase(getString(R.string.home_screen))) {
                 finish();
             }
         }

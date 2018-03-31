@@ -3,6 +3,7 @@ package com.eveningoutpost.dexdrip.calibrations;
 import com.eveningoutpost.dexdrip.Models.BgReading;
 import com.eveningoutpost.dexdrip.Models.JoH;
 import com.eveningoutpost.dexdrip.Models.UserError;
+import com.eveningoutpost.dexdrip.UtilityModels.Constants;
 import com.eveningoutpost.dexdrip.UtilityModels.PersistentStore;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -32,6 +33,10 @@ public abstract class CalibrationAbstract {
     // get the calibration data (caching is handled internally)
 
     public synchronized CalibrationData getCalibrationData() {
+        return getCalibrationData(JoH.tsl() + Constants.HOUR_IN_MS);
+    }
+
+    public synchronized CalibrationData getCalibrationData(long until) {
         // default no implementation
         return null;
     }
@@ -121,6 +126,18 @@ public abstract class CalibrationAbstract {
         return bgReading.age_adjusted_raw_value * data.slope + data.intercept;
     }
 
+    public BgReading getBgReadingFromBgReading(BgReading bgReading, CalibrationData data) {
+        if (data == null) return null;
+        if (bgReading == null) return null;
+        // do we need deep clone?
+        final BgReading new_bg = (BgReading) JoH.cloneObject(bgReading);
+        if (new_bg == null) return null;
+        // algorithm can override to decide whether or not to be using age_adjusted_raw
+        new_bg.calculated_value = getGlucoseFromBgReading(bgReading, data);
+        new_bg.filtered_calculated_value = getGlucoseFromFilteredBgReading(bgReading, data);
+        return new_bg;
+    }
+
     public double getGlucoseFromFilteredBgReading(BgReading bgReading, CalibrationData data) {
         if (data == null) return -1;
         if (bgReading == null) return -1;
@@ -147,6 +164,7 @@ public abstract class CalibrationAbstract {
         }
     }
 
+    // persistent old style cache
     protected static boolean saveDataToCache(String tag, CalibrationData data) {
         final String lookup_tag = "CalibrationDataCache-" + tag;
         memory_cache.put(lookup_tag, data);
@@ -154,6 +172,26 @@ public abstract class CalibrationAbstract {
         return true;
     }
 
+    // memory only cache
+    protected static boolean clearMemoryCache() {
+        memory_cache.clear();
+        return true;
+    }
+
+    // memory only cache - TODO possible room for improvement using timestamp as well
+    protected static boolean saveDataToCache(String tag, CalibrationData data, long timestamp, long last_calibration) {
+        final String lookup_tag = tag + last_calibration;
+        memory_cache.put(lookup_tag, data);
+        return true;
+    }
+
+    // memory only cache
+    protected static CalibrationData loadDataFromCache(String tag, long timestamp) {
+        final String lookup_tag = tag + timestamp;
+        return memory_cache.get(lookup_tag);
+    }
+
+    // persistent old style cache
     protected static CalibrationData loadDataFromCache(String tag) {
         final String lookup_tag = "CalibrationDataCache-" + tag;
         if (!memory_cache.containsKey(lookup_tag)) {

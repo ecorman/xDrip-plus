@@ -14,16 +14,18 @@ import com.activeandroid.query.Delete;
 import com.activeandroid.query.Select;
 import com.activeandroid.util.SQLiteUtils;
 import com.eveningoutpost.dexdrip.GcmActivity;
-import com.eveningoutpost.dexdrip.GoogleDriveInterface;
 import com.eveningoutpost.dexdrip.Home;
 import com.eveningoutpost.dexdrip.Models.UserError.Log;
 import com.eveningoutpost.dexdrip.R;
 import com.eveningoutpost.dexdrip.Services.SyncService;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.UtilityModels.UndoRedo;
 import com.eveningoutpost.dexdrip.UtilityModels.UploaderQueue;
 import com.eveningoutpost.dexdrip.xdrip;
+import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.Expose;
+import com.google.gson.internal.bind.DateTypeAdapter;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -44,6 +46,7 @@ import java.util.UUID;
 @Table(name = "Treatments", id = BaseColumns._ID)
 public class Treatments extends Model {
     private final static String TAG = "jamorham " + Treatments.class.getSimpleName();
+    public final static String XDRIP_TAG = "xdrip";
     public static double activityMultipler = 8.4; // somewhere between 8.2 and 8.8
     private static Treatments lastCarbs;
     private static boolean patched = false;
@@ -74,6 +77,10 @@ public class Treatments extends Model {
     public String created_at;
 
     public static synchronized Treatments create(final double carbs, final double insulin, long timestamp) {
+        return create(carbs, insulin, timestamp, null);
+    }
+
+    public static synchronized Treatments create(final double carbs, final double insulin, long timestamp, String suggested_uuid) {
         // if treatment more than 1 minutes in the future
         final long future_seconds = (timestamp - JoH.tsl()) / 1000;
         if (future_seconds > (60 * 60)) {
@@ -86,12 +93,12 @@ public class Treatments extends Model {
                     + carbs + " " + context.getString(R.string.carbs) + " / "
                     + insulin + " " + context.getString(R.string.units), (int) future_seconds, 34026);
         }
-        return create(carbs, insulin, timestamp, -1);
+        return create(carbs, insulin, timestamp, -1, suggested_uuid);
     }
 
-    public static synchronized Treatments create(final double carbs, final double insulin, long timestamp, double position) {
+    public static synchronized Treatments create(final double carbs, final double insulin, long timestamp, double position, String suggested_uuid) {
         // TODO sanity check values
-        Log.d(TAG, "Creating treatment: Insulin: " + Double.toString(insulin) + " / Carbs: " + Double.toString(carbs));
+        Log.d(TAG, "Creating treatment: Insulin: " + Double.toString(insulin) + " / Carbs: " + Double.toString(carbs) + (suggested_uuid != null && !suggested_uuid.isEmpty() ? " uuid: " + suggested_uuid : ""));
 
         if ((carbs == 0) && (insulin == 0)) return null;
 
@@ -102,9 +109,9 @@ public class Treatments extends Model {
         Treatments Treatment = new Treatments();
 
         if (position > 0) {
-            Treatment.enteredBy = "xdrip pos:" + JoH.qs(position, 2);
+            Treatment.enteredBy = XDRIP_TAG + " pos:" + JoH.qs(position, 2);
         } else {
-            Treatment.enteredBy = "xdrip";
+            Treatment.enteredBy = XDRIP_TAG;
         }
 
         Treatment.eventType = "<none>";
@@ -112,10 +119,10 @@ public class Treatments extends Model {
         Treatment.insulin = insulin;
         Treatment.timestamp = timestamp;
         Treatment.created_at = DateUtil.toISOString(timestamp);
-        Treatment.uuid = UUID.randomUUID().toString();
+        Treatment.uuid = suggested_uuid != null ? suggested_uuid : UUID.randomUUID().toString();
         Treatment.save();
-       // GcmActivity.pushTreatmentAsync(Treatment);
-      //  NSClientChat.pushTreatmentAsync(Treatment);
+        // GcmActivity.pushTreatmentAsync(Treatment);
+        //  NSClientChat.pushTreatmentAsync(Treatment);
         pushTreatmentSync(Treatment);
         UndoRedo.addUndoTreatment(Treatment.uuid);
         return Treatment;
@@ -123,10 +130,14 @@ public class Treatments extends Model {
 
     // Note
     public static synchronized Treatments create_note(String note, long timestamp) {
-        return create_note(note, timestamp, -1);
+        return create_note(note, timestamp, -1, null);
     }
 
     public static synchronized Treatments create_note(String note, long timestamp, double position) {
+        return create_note(note, timestamp, position, null);
+    }
+
+    public static synchronized Treatments create_note(String note, long timestamp, double position, String suggested_uuid) {
         // TODO sanity check values
         Log.d(TAG, "Creating treatment note: " + note);
 
@@ -140,50 +151,96 @@ public class Treatments extends Model {
         }
 
         boolean is_new = false;
-
         // find treatment
-        Treatments Treatment = byTimestamp(timestamp, 60 * 1000 * 5);
 
+        Treatments treatment = byTimestamp(timestamp, 60 * 1000 * 5);
         // if unknown create
-        if (Treatment == null) {
-            Treatment = new Treatments();
+        if (treatment == null) {
+            treatment = new Treatments();
             Log.d(TAG, "Creating new treatment entry for note");
             is_new = true;
 
-            Treatment.eventType = "<none>";
-            Treatment.carbs = 0;
-            Treatment.insulin = 0;
-            Treatment.notes = note;
-            Treatment.timestamp = timestamp;
-            Treatment.created_at = DateUtil.toISOString(timestamp);
-            Treatment.uuid = UUID.randomUUID().toString();
+            treatment.eventType = "<none>";
+            treatment.carbs = 0;
+            treatment.insulin = 0;
+            treatment.notes = note;
+            treatment.timestamp = timestamp;
+            treatment.created_at = DateUtil.toISOString(timestamp);
+            treatment.uuid = suggested_uuid != null ? suggested_uuid : UUID.randomUUID().toString();
 
         } else {
-            if (Treatment.notes == null) Treatment.notes = "";
-            Log.d(TAG, "Found existing treatment for note: " + Treatment.uuid + " distance:" + Long.toString(timestamp - Treatment.timestamp) + " " + Treatment.notes);
+            if (treatment.notes == null) treatment.notes = "";
+            Log.d(TAG, "Found existing treatment for note: " + treatment.uuid + ((suggested_uuid != null) ? " vs suggested: " + suggested_uuid : "") + " distance:" + Long.toString(timestamp - treatment.timestamp) + " " + treatment.notes);
+            if (treatment.notes.contains(note)) {
+                Log.d(TAG, "Suggested note update already present - skipping");
+                return null;
+            }
             // append existing note or treatment
-            if (Treatment.notes.length() > 0) Treatment.notes += " \u2192 ";
-            Treatment.notes += note;
+            if (treatment.notes.length() > 0) treatment.notes += " \u2192 ";
+            treatment.notes += note;
+            Log.d(TAG, "Final notes: " + treatment.notes);
+        }
+        //    if ((treatment.enteredBy == null) || (!treatment.enteredBy.contains(NightscoutUploader.VIA_NIGHTSCOUT_TAG))) {
+        // tag it as from xdrip if it isn't being synced from nightscout right now to allow local updates to nightscout sourced notes
+        if (suggested_uuid == null) {
+            if (position > 0) {
+                treatment.enteredBy = XDRIP_TAG + " pos:" + JoH.qs(position, 2);
+            } else {
+                treatment.enteredBy = XDRIP_TAG;
+            }
         }
 
-        if (position > 0) {
-            Treatment.enteredBy = "xdrip pos:" + JoH.qs(position, 2);
-        } else {
-            Treatment.enteredBy = "xdrip";
+        treatment.save();
+
+        pushTreatmentSync(treatment, is_new, suggested_uuid);
+        if (is_new) UndoRedo.addUndoTreatment(treatment.uuid);
+
+        return treatment;
+    }
+
+    public static synchronized Treatments SensorStart(long timestamp) {
+        if (timestamp == 0) {
+            timestamp = new Date().getTime();
         }
 
-
+        final Treatments Treatment = new Treatments();
+        Treatment.enteredBy = XDRIP_TAG;
+        Treatment.eventType = "Sensor Start";
+        Treatment.created_at = DateUtil.toISOString(timestamp);
+        Treatment.timestamp = timestamp;
+        Treatment.uuid = UUID.randomUUID().toString();
         Treatment.save();
         pushTreatmentSync(Treatment);
-        if (is_new) UndoRedo.addUndoTreatment(Treatment.uuid);
         return Treatment;
     }
 
-    public static void pushTreatmentSync(Treatments treatment) {
-        GcmActivity.pushTreatmentAsync(treatment);
-        NSClientChat.pushTreatmentAsync(treatment);
-        if (UploaderQueue.newEntry("insert",treatment) != null) {
-            SyncService.startSyncService(3000); // sync in 3 seconds
+    private static void pushTreatmentSync(Treatments treatment) {
+        pushTreatmentSync(treatment, true, null); // new entry by default
+    }
+
+    private static void pushTreatmentSync(Treatments treatment, boolean is_new, String suggested_uuid) {;
+        if (Home.get_master_or_follower()) GcmActivity.pushTreatmentAsync(treatment);
+
+        if (!(Pref.getBoolean("cloud_storage_api_enable", false) || Pref.getBoolean("cloud_storage_mongodb_enable", false))) {
+            NSClientChat.pushTreatmentAsync(treatment);
+        } else {
+            Log.d(TAG, "Skipping NSClient treatment broadcast as nightscout direct sync is enabled");
+        }
+
+        if (suggested_uuid == null) {
+            // only sync to nightscout if source of change was not from nightscout
+            if (UploaderQueue.newEntry(is_new ? "insert" : "update", treatment) != null) {
+                SyncService.startSyncService(3000); // sync in 3 seconds
+            }
+        }
+    }
+
+    public static void pushTreatmentSyncToWatch(Treatments treatment, boolean is_new) {
+        Log.d(TAG, "pushTreatmentSyncToWatch Add treatment to UploaderQueue.");
+        if (Pref.getBooleanDefaultFalse("wear_sync")) {
+            if (UploaderQueue.newEntryForWatch(is_new ? "insert" : "update", treatment) != null) {
+                SyncService.startSyncService(3000); // sync in 3 seconds
+            }
         }
     }
 
@@ -215,13 +272,28 @@ public class Treatments extends Model {
     }
 
     public static Treatments last() {
+        fixUpTable();
         return new Select()
                 .from(Treatments.class)
                 .orderBy("_ID desc")
                 .executeSingle();
     }
 
+    public static List<Treatments> latest(int num) {
+        try {
+            return new Select()
+                    .from(Treatments.class)
+                    .orderBy("timestamp desc")
+                    .limit(num)
+                    .execute();
+        } catch (android.database.sqlite.SQLiteException e) {
+            fixUpTable();
+            return null;
+        }
+    }
+
     public static Treatments byuuid(String uuid) {
+        if (uuid == null) return null;
         return new Select()
                 .from(Treatments.class)
                 .where("uuid = ?", uuid)
@@ -266,6 +338,20 @@ public class Treatments extends Model {
         return delete_last(false);
     }
 
+    public static void delete_by_timestamp(long timestamp) {
+        delete_by_timestamp(timestamp, 1500, false);
+    }
+
+    public static void delete_by_timestamp(long timestamp, int accuracy, boolean from_interactive) {
+        final Treatments t = byTimestamp(timestamp, accuracy); // do we need to alter default accuracy?
+        if (t != null) {
+            Log.d(TAG, "Deleting treatment closest to: " + JoH.dateTimeText(timestamp) + " matches uuid: " + t.uuid);
+            delete_by_uuid(t.uuid, from_interactive);
+        } else {
+            Log.e(TAG, "Couldn't find a treatment near enough to " + JoH.dateTimeText(timestamp) + " to delete!");
+        }
+    }
+
     public static void delete_by_uuid(String uuid)
     {
         delete_by_uuid(uuid,false);
@@ -275,7 +361,7 @@ public class Treatments extends Model {
         Treatments thistreat = byuuid(uuid);
         if (thistreat != null) {
 
-            UploaderQueue.newEntry("delete",thistreat);
+            UploaderQueue.newEntry("delete", thistreat);
             if (from_interactive) {
                 GcmActivity.push_delete_treatment(thistreat);
                 SyncService.startSyncService(3000); // sync in 3 seconds
@@ -316,16 +402,36 @@ public class Treatments extends Model {
     }
 
     public static synchronized boolean pushTreatmentFromJson(String json, boolean from_interactive) {
-        Log.d(TAG, "converting treatment from json: ");
+        Log.d(TAG, "converting treatment from json: " + json);
         Treatments mytreatment = fromJSON(json);
         if (mytreatment != null) {
+            if ((mytreatment.carbs == 0) && (mytreatment.insulin == 0)
+                    && (mytreatment.notes != null) && (mytreatment.notes.equals("AndroidAPS started"))) {
+                Log.d(TAG, "Skipping AndroidAPS started message");
+                return false;
+            }
+            if ((mytreatment.eventType != null) && (mytreatment.eventType.equals("Temp Basal"))) {
+                // we don't yet parse or process these
+                Log.d(TAG, "Skipping Temp Basal msg");
+                return false;
+            }
+
+            if (mytreatment.uuid == null) {
+                try {
+                    final JSONObject jsonobj = new JSONObject(json);
+                    if (jsonobj.has("_id")) mytreatment.uuid = jsonobj.getString("_id");
+                } catch (JSONException e) {
+                    //
+                }
+                if (mytreatment.uuid == null) mytreatment.uuid = UUID.randomUUID().toString();
+            }
             Treatments dupe_treatment = byTimestamp(mytreatment.timestamp);
             if (dupe_treatment != null) {
                 Log.i(TAG, "Duplicate treatment for: " + mytreatment.timestamp);
 
                 if ((dupe_treatment.uuid !=null) && (mytreatment.uuid !=null) && (dupe_treatment.uuid.equals(mytreatment.uuid)) && (mytreatment.notes != null))
                 {
-                    if ((dupe_treatment.notes == null) || (dupe_treatment.notes.length()<mytreatment.notes.length()))
+                    if ((dupe_treatment.notes == null) || (dupe_treatment.notes.length() < mytreatment.notes.length()))
                     {
                         dupe_treatment.notes = mytreatment.notes;
                         fixUpTable();
@@ -814,6 +920,14 @@ public class Treatments extends Model {
         return responses;
     }
 
+    public String getBestShortText() {
+        if (!eventType.equals("<none>")) {
+            return eventType;
+        } else {
+            return "Treatment";
+        }
+    }
+
     public String toJSON() {
         JSONObject jsonObject = new JSONObject();
         try {
@@ -829,6 +943,15 @@ public class Treatments extends Model {
             e.printStackTrace();
             return "";
         }
+    }
+
+    public String toS() {
+        Gson gson = new GsonBuilder()
+                .excludeFieldsWithoutExposeAnnotation()
+                .registerTypeAdapter(Date.class, new DateTypeAdapter())
+                .serializeSpecialFloatingPointValues()
+                .create();
+        return gson.toJson(this);
     }
 }
 

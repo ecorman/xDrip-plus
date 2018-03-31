@@ -13,6 +13,7 @@ import android.util.Log;
 import android.view.View;
 import android.widget.Toast;
 
+import com.eveningoutpost.dexdrip.AddCalibration;
 import com.eveningoutpost.dexdrip.GcmActivity;
 import com.eveningoutpost.dexdrip.Home;
 import com.eveningoutpost.dexdrip.Models.BgReading;
@@ -21,9 +22,10 @@ import com.eveningoutpost.dexdrip.Models.Calibration;
 import com.eveningoutpost.dexdrip.Models.Forecast;
 import com.eveningoutpost.dexdrip.Models.Forecast.PolyTrendLine;
 import com.eveningoutpost.dexdrip.Models.Forecast.TrendLine;
+import com.eveningoutpost.dexdrip.Models.HeartRate;
 import com.eveningoutpost.dexdrip.Models.Iob;
 import com.eveningoutpost.dexdrip.Models.JoH;
-import com.eveningoutpost.dexdrip.Models.PebbleMovement;
+import com.eveningoutpost.dexdrip.Models.StepCounter;
 import com.eveningoutpost.dexdrip.Models.Profile;
 import com.eveningoutpost.dexdrip.Models.Treatments;
 import com.eveningoutpost.dexdrip.Models.UserError;
@@ -31,7 +33,10 @@ import com.eveningoutpost.dexdrip.R;
 import com.eveningoutpost.dexdrip.Services.ActivityRecognizedService;
 import com.eveningoutpost.dexdrip.calibrations.CalibrationAbstract;
 import com.eveningoutpost.dexdrip.calibrations.PluggableCalibration;
+import com.eveningoutpost.dexdrip.store.FastStore;
+import com.eveningoutpost.dexdrip.store.KeyStore;
 import com.eveningoutpost.dexdrip.utils.DexCollectionType;
+import com.eveningoutpost.dexdrip.utils.LibreTrendGraph;
 import com.eveningoutpost.dexdrip.xdrip;
 import com.google.android.gms.location.DetectedActivity;
 import com.rits.cloning.Cloner;
@@ -68,7 +73,7 @@ import static com.eveningoutpost.dexdrip.UtilityModels.ColorCache.X;
 import static com.eveningoutpost.dexdrip.UtilityModels.ColorCache.getCol;
 
 /**
- * Created by stephenblack on 11/15/14.
+ * Created by Emma Black on 11/15/14.
  */
 
 class PointValueExtended extends PointValue {
@@ -93,12 +98,14 @@ class PointValueExtended extends PointValue {
     String note;
     int type = 0;
     String uuid;
+    long real_timestamp = 0;
 }
 
 public class BgGraphBuilder {
     public static final int FUZZER = (1000 * 30 * 5); // 2.5 mins?
     public final static long DEXCOM_PERIOD = 300000;
     public final static double NOISE_TRIGGER = 10;
+    public final static double NOISE_TRIGGER_ULTRASENSITIVE = 1;
     public final static double NOISE_TOO_HIGH_FOR_PREDICT = 60;
     public final static double NOISE_HIGH = 200;
     public final static double NOISE_FORGIVE = 100;
@@ -118,6 +125,8 @@ public class BgGraphBuilder {
     public double end_time = (new Date().getTime() + (60000 * 10)) / FUZZER;
     public double predictive_end_time;
     public double start_time = end_time - ((60000 * 60 * 24)) / FUZZER;
+
+
     private final static double timeshift = 500000;
     private static final int NUM_VALUES = (60 / 5) * 24;
 
@@ -172,7 +181,7 @@ public class BgGraphBuilder {
     public static double original_value = -99999;
     public static double best_bg_estimate = -99999;
     public static double last_bg_estimate = -99999;
-
+    private KeyStore keyStore = FastStore.getInstance();
 
     public BgGraphBuilder(Context context) {
         this(context, new Date().getTime() + (60000 * 10));
@@ -224,7 +233,8 @@ public class BgGraphBuilder {
             }
         }
         bloodtests = BloodTest.latestForGraph(numValues, start, end);
-        calibrations = Calibration.latestForGraph(numValues, start, end);
+        // get extra calibrations so we can use them for historical readings
+        calibrations = Calibration.latestForGraph(numValues, start - (3 * Constants.DAY_IN_MS), end);
         treatments = Treatments.latestForGraph(numValues, start, end + (120 * 60 * 1000));
         this.context = context;
         this.highMark = tolerantParseDouble(prefs.getString("highValue", "170"));
@@ -250,18 +260,6 @@ public class BgGraphBuilder {
             return 1;
     }
 
-    private static Object cloneObject(Object obj) {
-        try {
-            Object clone = obj.getClass().newInstance();
-            for (Field field : obj.getClass().getDeclaredFields()) {
-                field.setAccessible(true);
-                field.set(clone, field.get(obj));
-            }
-            return clone;
-        } catch (Exception e) {
-            return null;
-        }
-    }
 
     static public boolean isXLargeTablet(Context context) {
         return (context.getResources().getConfiguration().screenLayout & Configuration.SCREENLAYOUT_SIZE_MASK) >= Configuration.SCREENLAYOUT_SIZE_XLARGE;
@@ -279,6 +277,7 @@ public class BgGraphBuilder {
         if (thisnoise > NOISE_HIGH) return "Extreme";
         if (thisnoise > NOISE_TOO_HIGH_FOR_PREDICT) return "Very High";
         if (thisnoise > NOISE_TRIGGER) return "High";
+        if (thisnoise > NOISE_TRIGGER_ULTRASENSITIVE && Pref.getBooleanDefaultFalse("engineering_mode") && Pref.getBooleanDefaultFalse("bg_compensate_noise_ultrasensitive")) return "Some";
         return "Low";
     }
 
@@ -295,18 +294,18 @@ public class BgGraphBuilder {
         final List<Line> stepsLines = new ArrayList<>();
         if ((prefs.getBoolean("use_pebble_health", true)
                 && prefs.getBoolean("show_pebble_movement_line", true))) {
-            final List<PebbleMovement> pmlist = PebbleMovement.deltaListFromMovementList(PebbleMovement.latestForGraph(2000, loaded_start, loaded_end));
+            final List<StepCounter> pmlist = StepCounter.deltaListFromMovementList(StepCounter.latestForGraph(2000, loaded_start, loaded_end));
             PointValue last_point = null;
             final boolean d = false;
             if (d) Log.d(TAG, "Delta: pmlist size: " + pmlist.size());
             final float yscale = doMgdl ? (float) Constants.MMOLL_TO_MGDL : 1f;
             final float ypos = 6 * yscale; // TODO Configurable
             //final long last_timestamp = pmlist.get(pmlist.size() - 1).timestamp;
-            final float MAX_SIZE = 40;
+            final float MAX_SIZE = 50;
             int flipper = 0;
             int accumulator = 0;
 
-            for (PebbleMovement pm : pmlist) {
+            for (StepCounter pm : pmlist) {
                 if (last_point == null) {
                     last_point = new PointValue((float) pm.timestamp / FUZZER, ypos);
                 } else {
@@ -323,7 +322,7 @@ public class BgGraphBuilder {
                         flipper ^= 1;
                         this_line.setColor((flipper == 0) ? getCol(X.color_step_counter1) : getCol(X.color_step_counter2));
 
-                        float stroke_size = Math.min(MAX_SIZE, (float) Math.log1p(((double) (pm.metric + accumulator)) / time_delta) * 5);
+                        float stroke_size = Math.min(MAX_SIZE, (float) Math.log1p(((double) (pm.metric + accumulator)) / time_delta) * 4);
                         if (d) Log.d(TAG, "Delta stroke: " + stroke_size);
                         this_line.setStrokeWidth((int) stroke_size);
 
@@ -352,6 +351,63 @@ public class BgGraphBuilder {
         }
         return stepsLines;
     }
+
+    // line illustrating result from heartrate monitor
+    private List<Line> heartLines() {
+        final boolean d = false;
+        final List<Line> heartLines = new ArrayList<>();
+        if ((prefs.getBoolean("use_pebble_health", true)
+                && prefs.getBoolean("show_pebble_movement_line", true))) {
+
+            final List<HeartRate> heartRates = HeartRate.latestForGraph(2000, loaded_start, loaded_end);
+
+            final long condenseCutoffMs = Pref.getBooleanDefaultFalse("smooth_heartrate") ? (10 * Constants.MINUTE_IN_MS) : FUZZER;
+            final List<HeartRate> condensedHeartRateList = new ArrayList<>();
+            for (HeartRate thisHeartRateRecord : heartRates) {
+                final int condensedListSize = condensedHeartRateList.size();
+                if (condensedListSize > 0) {
+                    final HeartRate tailOfList = condensedHeartRateList.get(condensedListSize - 1);
+                    // if its close enough to merge then average with previous
+                    if ((thisHeartRateRecord.timestamp - tailOfList.timestamp) < condenseCutoffMs) {
+                        tailOfList.bpm = (tailOfList.bpm += thisHeartRateRecord.bpm) / 2;
+                    } else {
+                        // not close enough to merge
+                        condensedHeartRateList.add(thisHeartRateRecord);
+                    }
+                } else {
+                    condensedHeartRateList.add(thisHeartRateRecord); // first record
+                }
+            }
+
+            if (d) Log.d(TAG, "heartrate before size: " + heartRates.size());
+            if (d) Log.d(TAG, "heartrate after c size: " + condensedHeartRateList.size());
+            //final float yscale = doMgdl ? (float) Constants.MMOLL_TO_MGDL : 1f;
+            final float yscale = doMgdl ?  10f : 1f;
+            float ypos; //
+
+            final List<PointValue> new_points = new ArrayList<>();
+            if (d) UserError.Log.d("HEARTRATE", "Size " + condensedHeartRateList.size());
+
+            for (HeartRate pm : condensedHeartRateList) {
+                if (d) UserError.Log.d("HEARTRATE: ", JoH.dateTimeText(pm.timestamp) + " \tHR: " + pm.bpm);
+
+                ypos = (pm.bpm * yscale) / 10;
+                final PointValue this_point = new PointValue((float) pm.timestamp / FUZZER, ypos);
+                new_points.add(this_point);
+            }
+            final Line macroHeartRateLine = new Line(new_points);
+            for (Line this_line : autoSplitLine(macroHeartRateLine, 30)) {
+                this_line.setColor(getCol(X.color_heart_rate1));
+                this_line.setStrokeWidth(6);
+                this_line.setHasPoints(false);
+                this_line.setHasLines(true);
+                this_line.setCubic(true);
+                heartLines.add(this_line);
+            }
+        }
+        return heartLines;
+    }
+
 
     private List<Line> motionLine() {
 
@@ -444,6 +500,7 @@ public class BgGraphBuilder {
         previewLineData.setAxisYLeft(yAxis());
         previewLineData.setAxisXBottom(previewXAxis());
 
+        // reduce complexity of preview chart by removing some lines
         final List<Line> removeItems = new ArrayList<>();
         int unlabledLinesSize = 1;
         if (isXLargeTablet(context)) {
@@ -451,7 +508,7 @@ public class BgGraphBuilder {
         }
         for (Line lline : previewLineData.getLines()) {
             if (((lline.getPointRadius() == pluginSize) && (lline.getPointColor() == getCol(X.color_secondary_glucose_value)))
-                    || ((lline.getColor() == getCol(X.color_step_counter1) || (lline.getColor() == getCol(X.color_step_counter2))))) {
+                    || ((lline.getColor() == getCol(X.color_step_counter1) || (lline.getColor() == getCol(X.color_step_counter2) || (lline.getColor()== getCol(X.color_heart_rate1)))))) {
                 removeItems.add(lline); // remove plugin or step counter plot from preview graph
             }
 
@@ -481,10 +538,12 @@ public class BgGraphBuilder {
 
             if (!simple) {
                 // motion lines
-                if (Home.getPreferencesBoolean("motion_tracking_enabled", false) && Home.getPreferencesBoolean("plot_motion", false)) {
+                if (Pref.getBoolean("motion_tracking_enabled", false) && Pref.getBoolean("plot_motion", false)) {
                     lines.addAll(motionLine());
                 }
+                lines.addAll(heartLines());
                 lines.addAll(stepsLines());
+
             }
 
             Line[] calib = calibrationValuesLine();
@@ -513,6 +572,12 @@ public class BgGraphBuilder {
             lines.add(treatments[6]); // cob
             lines.add(treatments[7]); // poly predict
 
+
+            if (prefs.getBoolean("show_libre_trend_line", false)) {
+                if (DexCollectionType.hasLibre()) {
+                    lines.add(LibreTrendLine());
+                }
+            }
 
             lines.add(minShowLine());
             lines.add(maxShowLine());
@@ -619,7 +684,7 @@ public class BgGraphBuilder {
                     if (thispoint.getX() == endmarker) {
                         thesepoints.add(thispoint);
                     }
-                    Line line = (Line) cloneObject(macroline); // aieeee
+                    Line line = (Line) JoH.cloneObject(macroline); // aieeee
                     line.setValues(thesepoints);
                     linearray.add(line);
                     thesepoints = new ArrayList<PointValue>();
@@ -909,11 +974,19 @@ public class BgGraphBuilder {
                 Profile.scale_factor = 1;
             }
 
+            final long close_to_side_time = (long) (end_time * FUZZER) - (Constants.MINUTE_IN_MS * 10);
             // enumerate calibrations
             try {
                 for (Calibration calibration : calibrations) {
+                    if (calibration.timestamp < (start_time * FUZZER)) break;
                     if (calibration.slope_confidence != 0) {
-                        calibrationValues.add(new PointValue((float) (calibration.timestamp / FUZZER), (float) unitized(calibration.bg)));
+                        final long adjusted_timestamp = (calibration.timestamp + (AddCalibration.estimatedInterstitialLagSeconds * 1000));
+                        final PointValueExtended this_point = new PointValueExtended((float) (adjusted_timestamp / FUZZER), (float) unitized(calibration.bg));
+                        if (adjusted_timestamp >= close_to_side_time) {
+                            predictivehours = Math.max(predictivehours, 1);
+                        }
+                        this_point.real_timestamp = calibration.timestamp;
+                        calibrationValues.add(this_point);
                         if (calibration.timestamp > last_calibration) {
                             last_calibration = calibration.timestamp;
                         }
@@ -926,13 +999,15 @@ public class BgGraphBuilder {
             // enumerate blood tests
             try {
                 for (BloodTest bloodtest : bloodtests) {
-                    final PointValueExtended this_point = new PointValueExtended((float) (bloodtest.timestamp / FUZZER), (float) unitized(bloodtest.mgdl));
+                    final long adjusted_timestamp = (bloodtest.timestamp + (AddCalibration.estimatedInterstitialLagSeconds * 1000));
+                    final PointValueExtended this_point = new PointValueExtended((float) (adjusted_timestamp / FUZZER), (float) unitized(bloodtest.mgdl));
                     this_point.type = PointValueExtended.BloodTest;
                     this_point.uuid = bloodtest.uuid;
+                    this_point.real_timestamp = bloodtest.timestamp;
                     // exclude any which have been used for calibration
                     boolean matches = false;
                     for (PointValue calibration_point : calibrationValues) {
-                        if ((calibration_point.getX() == this_point.getX()) && (calibration_point.getY() == calibration_point.getY())) {
+                        if ((Math.abs(calibration_point.getX() - this_point.getX())) <= ((AddCalibration.estimatedInterstitialLagSeconds * 1000) / FUZZER) && (calibration_point.getY() == calibration_point.getY())) {
                             matches = true;
                             break;
                         }
@@ -940,6 +1015,9 @@ public class BgGraphBuilder {
                     if (!matches) bloodTestValues.add(this_point);
                     if (bloodtest.timestamp > last_bloodtest) {
                         last_bloodtest = bloodtest.timestamp;
+                    }
+                    if (adjusted_timestamp >= close_to_side_time) {
+                        predictivehours = Math.max(predictivehours, 1);
                     }
                 }
             } catch (Exception e) {
@@ -960,7 +1038,8 @@ public class BgGraphBuilder {
             }
 
             final CalibrationAbstract plugin = (show_plugin) ? PluggableCalibration.getCalibrationPluginFromPreferences() : null;
-            final CalibrationAbstract.CalibrationData cd = (plugin != null) ? plugin.getCalibrationData() : null;
+            CalibrationAbstract.CalibrationData cd = (plugin != null) ? plugin.getCalibrationData() : null;
+            int cdposition = 0;
 
             if ((glucose_from_plugin) && (cd != null)) {
                 plugin_adjusted = true; // plugin will be adjusting data
@@ -968,6 +1047,29 @@ public class BgGraphBuilder {
 
             for (final BgReading bgReading : bgReadings) {
                 // jamorham special
+
+                if ((cd != null) && (calibrations.size() > 0)) {
+
+                    while ((bgReading.timestamp < calibrations.get(cdposition).timestamp) || (calibrations.get(cdposition).slope == 0)) {
+
+                        Log.d(TAG, "BG reading earlier than calibration at index: " + cdposition + "  " + JoH.dateTimeText(bgReading.timestamp) + " cal: " + JoH.dateTimeText(calibrations.get(cdposition).timestamp));
+
+                        if (cdposition < calibrations.size() - 1) {
+                            cdposition++;
+                            //  cd = (plugin != null) ? plugin.getCalibrationData(calibrations.get(cdposition).timestamp) : null;
+                            final CalibrationAbstract.CalibrationData oldcd = cd;
+                            cd = plugin.getCalibrationData(calibrations.get(cdposition).timestamp);
+                            if (cd == null) {
+                                Log.d(TAG, "cd went to null during adjustment - likely graph spans multiple sensors");
+                                cd = oldcd;
+                            }
+                            Log.d(TAG, "Now using calibration from: " + JoH.dateTimeText(calibrations.get(cdposition).timestamp) + " slope: " + cd.slope + " intercept: " + cd.intercept);
+                        } else {
+                            Log.d(TAG, "No more calibrations to choose from");
+                            break;
+                        }
+                    }
+                }
 
                 // swap main and plugin plot if display glucose is from plugin
                 if ((glucose_from_plugin) && (cd != null)) {
@@ -1184,7 +1286,11 @@ public class BgGraphBuilder {
                 }
 
                 final boolean show_noise_working_line;
-                if ((last_noise > NOISE_TRIGGER) && prefs.getBoolean("bg_compensate_noise", false)) {
+                if (last_noise > NOISE_TRIGGER ||
+                        (last_noise > BgGraphBuilder.NOISE_TRIGGER_ULTRASENSITIVE
+                                && Pref.getBooleanDefaultFalse("engineering_mode")
+                                && Pref.getBooleanDefaultFalse("bg_compensate_noise_ultrasensitive")
+                        )) {
                     show_noise_working_line = true;
                 } else {
                     show_noise_working_line = prefs.getBoolean("show_noise_workings", false);
@@ -1225,21 +1331,23 @@ public class BgGraphBuilder {
                         if (height > highMark) height = highMark;
                         if (height < lowMark) height = lowMark;
 
-                        PointValueExtended pv = new PointValueExtended((float) (treatment.timestamp / FUZZER), (float) height);
+                        final PointValueExtended pv = new PointValueExtended((float) (treatment.timestamp / FUZZER), (float) height);
                         String mylabel = "";
                         if (treatment.insulin > 0) {
                             if (mylabel.length() > 0)
                                 mylabel = mylabel + System.getProperty("line.separator");
-                            mylabel = mylabel + (Double.toString(treatment.insulin) + "u").replace(".0u", "u");
+                            mylabel = mylabel + (JoH.qs(treatment.insulin,2) + "u").replace(".0u", "u");
                         }
                         if (treatment.carbs > 0) {
                             if (mylabel.length() > 0)
                                 mylabel = mylabel + System.getProperty("line.separator");
-                            mylabel = mylabel + (Double.toString(treatment.carbs) + "g").replace(".0g", "g");
+                            mylabel = mylabel + (JoH.qs(treatment.carbs,1) + "g").replace(".0g", "g");
                         }
                         pv.setLabel(mylabel); // standard label
+                        //Log.d(TAG, "watchkeypad pv.mylabel: " + mylabel);
                         if ((treatment.notes != null) && (treatment.notes.length() > 0)) {
                             pv.note = treatment.notes;
+                            //Log.d(TAG, "watchkeypad pv.note: " + pv.note + " mylabel: " + mylabel);
                             try {
                                 final Pattern p = Pattern.compile(".*?pos:([0-9.]+).*");
                                 final Matcher m = p.matcher(treatment.enteredBy);
@@ -1250,7 +1358,7 @@ public class BgGraphBuilder {
                                 Log.d(TAG, "Exception matching position: " + e);
                             }
                         } else {
-                            pv.note = "Treatment";
+                            pv.note = treatment.getBestShortText();
                         }
                         if (treatmentValues.size() > 0) { // not sure if this >1 is right really - needs a review
                             PointValue lastpv = treatmentValues.get(treatmentValues.size() - 1);
@@ -1325,10 +1433,10 @@ public class BgGraphBuilder {
                     if ((iobinfo != null) && (prediction_enabled) && (simulation_enabled)) {
 
                         double predict_weight = 0.1;
-
+                        boolean iob_shown_already = false;
                         for (Iob iob : iobinfo) {
 
-                            double activity = iob.activity;
+                            //double activity = iob.activity;
                             if ((iob.iob > 0) || (iob.cob > 0) || (iob.jActivity > 0) || (iob.jCarbImpact > 0)) {
                                 fuzzed_timestamp = iob.timestamp / FUZZER;
                                 if (d) Log.d(TAG, "iob timestamp: " + iob.timestamp);
@@ -1401,19 +1509,23 @@ public class BgGraphBuilder {
                                     if (d)
                                         Log.d(TAG, "Predictive hours updated to: " + predictivehours);
                                 } else {
-                                    if ((fuzzed_timestamp == end_time - 4) && (iob.iob > 0)) {
+                                    //KS Log.d(TAG, "IOB DEBUG: " + (fuzzed_timestamp - end_time) + " " + iob.iob);
+                                    if (!iob_shown_already && (Math.abs(fuzzed_timestamp - end_time) < 5) && (iob.iob > 0)) {
+                                        iob_shown_already = true;
                                         // show current iob
-                                        double position = 12.4 * bgScale; // this is for mmol - needs generic for mg/dl
-                                        if (Math.abs(predictedbg - position) < (2 * bgScale)) {
-                                            position = 7.0 * bgScale;
-                                        }
+                                      //  double position = 12.4 * bgScale; // this is for mmol - needs generic for mg/dl
+                                      //  if (Math.abs(predictedbg - position) < (2 * bgScale)) {
+                                      //      position = 7.0 * bgScale;
+                                      //  }
 
-                                        PointValue iv = new PointValue((float) fuzzed_timestamp, (float) position);
+                                       // PointValue iv = new PointValue((float) fuzzed_timestamp, (float) position);
                                         DecimalFormat df = new DecimalFormat("#");
                                         df.setMaximumFractionDigits(2);
                                         df.setMinimumIntegerDigits(1);
-                                        iv.setLabel("IoB: " + df.format(iob.iob));
-                                        annotationValues.add(iv); // needs to be different value list so we can make annotation nicer
+                                      //  iv.setLabel("IoB: " + df.format(iob.iob));
+                                        Home.updateStatusLine("iob", df.format(iob.iob));
+                                      //  annotationValues.add(iv); // needs to be different value list so we can make annotation nicer
+
                                     }
                                 }
 
@@ -1430,28 +1542,36 @@ public class BgGraphBuilder {
 
                     double[] evaluation;
                     if (prediction_enabled && simulation_enabled) {
-                        if (doMgdl) {
-                            // These routines need to understand how the profile is defined to use native instead of scaled
-                            evaluation = Profile.evaluateEndGameMmol(predictedbg, lasttimestamp * FUZZER, end_time * FUZZER);
-                        } else {
-                            evaluation = Profile.evaluateEndGameMmol(predictedbg, lasttimestamp * FUZZER, end_time * FUZZER);
+                        // if (doMgdl) {
+                        // These routines need to understand how the profile is defined to use native instead of scaled
+                        evaluation = Profile.evaluateEndGameMmol(predictedbg, lasttimestamp * FUZZER, end_time * FUZZER);
+                        // } else {
+                        //    evaluation = Profile.evaluateEndGameMmol(predictedbg, lasttimestamp * FUZZER, end_time * FUZZER);
 
-                        }
+                        // }
 
+                        String bwp_update = "";
+                        keyStore.putL("bwp_last_insulin_timestamp", -1);
                         if (d)
                             Log.i(TAG, "Predictive BWP: Current prediction: " + JoH.qs(predictedbg) + " / carbs: " + JoH.qs(evaluation[0]) + " insulin: " + JoH.qs(evaluation[1]));
-                        if ((low_occurs_at < 1) && (Home.getPreferencesBooleanDefaultFalse("show_bwp"))) {
-                            if (evaluation[0] > Profile.minimum_carb_recommendation) {
-                                PointValue iv = new PointValue((float) fuzzed_timestamp, (float) (10 * bgScale));
-                                iv.setLabel("+Carbs: " + JoH.qs(evaluation[0], 0));
-                                annotationValues.add(iv); // needs to be different value list so we can make annotation nicer
-                            }
-                            if (evaluation[1] > Profile.minimum_insulin_recommendation) {
-                                PointValue iv = new PointValue((float) fuzzed_timestamp, (float) (11 * bgScale));
-                                iv.setLabel("+Insulin: " + JoH.qs(evaluation[1], 1));
-                                annotationValues.add(iv); // needs to be different value list so we can make annotation nicer
+                        if (!BgReading.isDataStale()) {
+                            if (((low_occurs_at < 1) || Pref.getBooleanDefaultFalse("always_show_bwp")) && (Pref.getBooleanDefaultFalse("show_bwp"))) {
+                                if (evaluation[0] > Profile.minimum_carb_recommendation) {
+                                    //PointValue iv = new PointValue((float) fuzzed_timestamp, (float) (10 * bgScale));
+                                    //iv.setLabel("+Carbs: " + JoH.qs(evaluation[0], 0));
+                                    bwp_update = "\u224F" + " Carbs: " + JoH.qs(evaluation[0], 0);
+                                    //annotationValues.add(iv); // needs to be different value list so we can make annotation nicer
+                                } else if (evaluation[1] > Profile.minimum_insulin_recommendation) {
+                                    //PointValue iv = new PointValue((float) fuzzed_timestamp, (float) (11 * bgScale));
+                                    //iv.setLabel("+Insulin: " + JoH.qs(evaluation[1], 1));
+                                    keyStore.putS("bwp_last_insulin", JoH.qs(evaluation[1], 1) + ((low_occurs_at > 0) ? ("!") : ""));
+                                    keyStore.putL("bwp_last_insulin_timestamp", JoH.tsl());
+                                    bwp_update = "\u224F" + " Insulin: " + JoH.qs(evaluation[1], 1) + ((low_occurs_at > 0) ? (" " + "\u26A0") : ""); // warning symbol
+                                    //annotationValues.add(iv); // needs to be different value list so we can make annotation nicer
+                                }
                             }
                         }
+                        Home.updateStatusLine("bwp", bwp_update); // always send so we can blank if needed
                     }
 
                 } catch (Exception e) {
@@ -1466,6 +1586,7 @@ public class BgGraphBuilder {
     public static synchronized double getCurrentLowOccursAt() {
         try {
             final long last_bg_reading_timestamp = BgReading.last().timestamp;
+            // TODO remove any duplication by using refreshNoiseIfOlderThan()
             if (low_occurs_at_processed_till_timestamp < last_bg_reading_timestamp) {
                 Log.d(TAG, "Recalculating lowOccursAt: " + JoH.dateTimeText((long) low_occurs_at_processed_till_timestamp) + " vs " + JoH.dateTimeText(last_bg_reading_timestamp));
                 // new only the last hour worth of data for this
@@ -1594,6 +1715,19 @@ public class BgGraphBuilder {
         return minShowLine;
     }
 
+    public Line LibreTrendLine() {
+        final List<PointValue> libreTrendValues =  LibreTrendGraph.getTrendDataPoints(doMgdl, (long)(start_time * FUZZER), (long)(end_time * FUZZER));
+        final Line line = new Line(libreTrendValues);
+        line.setHasPoints(true);
+        line.setHasLines(false);
+        line.setCubic(false);
+        line.setStrokeWidth(2);
+        line.setPointRadius(1);
+        line.setColor(Color.argb(240,25,206,244)); // temporary pending preference
+        return line;
+    }
+
+
     /////////AXIS RELATED//////////////
     public Axis yAxis() {
         Axis yAxis = new Axis();
@@ -1692,9 +1826,9 @@ public class BgGraphBuilder {
     }
 */
     /////////VIEWPORT RELATED//////////////
-    public Viewport advanceViewport(Chart chart, Chart previewChart) {
+    public Viewport advanceViewport(Chart chart, Chart previewChart, float hours) {
         viewport = new Viewport(previewChart.getMaximumViewport());
-        viewport.inset((float) ((86400000 / 2.5) / FUZZER), 0);
+        viewport.inset((float) ((86400000 / hours) / FUZZER), 0);
         double distance_to_move = ((new Date().getTime()) / FUZZER) - viewport.left - (((viewport.right - viewport.left) / 2));
         viewport.offset((float) distance_to_move, 0);
         return viewport;
@@ -1722,10 +1856,10 @@ public class BgGraphBuilder {
     }
 
     public static String unitized_string_static(double value) {
-        return unitized_string(value, Home.getPreferencesStringWithDefault("units", "mgdl").equals("mgdl"));
+        return unitized_string(value, Pref.getString("units", "mgdl").equals("mgdl"));
     }
     public static String unitized_string_with_units_static(double value) {
-        final boolean domgdl = Home.getPreferencesStringWithDefault("units", "mgdl").equals("mgdl");
+        final boolean domgdl = Pref.getString("units", "mgdl").equals("mgdl");
         return unitized_string(value, domgdl)+" "+(domgdl ? "mg/dl" : "mmol/l");
     }
 
@@ -1863,6 +1997,7 @@ public class BgGraphBuilder {
             String alternate = "";
             String uuid = "";
             int type = 0;
+            long real_timestamp = 0;
             try {
                 PointValueExtended pve = (PointValueExtended) pointValue;
                 type = pve.type;
@@ -1875,16 +2010,19 @@ public class BgGraphBuilder {
                 if (pve.uuid != null) {
                     uuid = pve.uuid;
                 }
+                real_timestamp = pve.real_timestamp;
+
             } catch (ClassCastException e) {
                 // Log.e(TAG, "Error casting a point from pointValue to PointValueExtended", e);
             }
 
             final java.text.DateFormat timeFormat = DateFormat.getTimeFormat(context);
             //Won't give the exact time of the reading but the time on the grid: close enough.
-            final Long time = ((long) pointValue.getX()) * FUZZER;
+            final Long time = (real_timestamp > 0) ? real_timestamp : ((long) pointValue.getX()) * FUZZER;
             final double ypos = pointValue.getY();
 
             final String message;
+
             if (alternate.length() > 0) {
                 message = timeFormat.format(time) + "    " + alternate;
             } else {

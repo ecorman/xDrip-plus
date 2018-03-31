@@ -12,7 +12,7 @@ import android.widget.Toast;
 import com.eveningoutpost.dexdrip.Home;
 import com.eveningoutpost.dexdrip.Models.BgReading;
 import com.eveningoutpost.dexdrip.Models.Calibration;
-import com.eveningoutpost.dexdrip.Models.UserError;
+import com.eveningoutpost.dexdrip.Models.JoH;
 
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
@@ -35,9 +35,10 @@ import lecho.lib.hellocharts.model.Viewport;
 import lecho.lib.hellocharts.util.ChartUtils;
 import lecho.lib.hellocharts.view.Chart;
 import com.eveningoutpost.dexdrip.Models.UserError.Log;
+import com.eveningoutpost.dexdrip.xdrip;
 
 /**
- * Created by stephenblack on 11/15/14.
+ * Created by Emma Black on 11/15/14.
  */
 
 class PointValueExtended extends PointValue {
@@ -58,6 +59,14 @@ class PointValueExtended extends PointValue {
 public class BgGraphBuilder {
 	private static final String TAG = BgGraphBuilder.class.getSimpleName();
     public static final int FUZZER = (1000 * 30 * 5);
+    public final static double NOISE_TRIGGER = 10;
+    public final static double NOISE_TOO_HIGH_FOR_PREDICT = 60;
+    public final static double NOISE_HIGH = 200;
+    public final static double NOISE_FORGIVE = 100;
+    public static double low_occurs_at = -1;
+    public static double previous_low_occurs_at = -1;
+    private static double low_occurs_at_processed_till_timestamp = -1;
+    private static long noise_processed_till_timestamp = -1;
     public static final int MAX_SLOPE_MINUTES = 21;
     public long  end_time;
     public long  start_time;
@@ -86,6 +95,7 @@ public class BgGraphBuilder {
     static final boolean FILL_UNDER_LINE = false;
     public Viewport viewport;
     public final static long DEXCOM_PERIOD = 300000;//KS from app / BgGraphBuilder.java
+    public static double last_noise = -99999;
 
 
     public BgGraphBuilder(Context context){
@@ -98,6 +108,10 @@ public class BgGraphBuilder {
 
     public BgGraphBuilder(Context context, long start, long end){
         this(context, start, end, NUM_VALUES);
+    }
+
+    public BgGraphBuilder(Context context, long start, long end, int numValues, boolean show_prediction) {//KS TODO implement show_prediction
+        this(context, start, end, numValues);
     }
 
     public BgGraphBuilder(Context context, long start, long end, int numValues){
@@ -137,6 +151,10 @@ public class BgGraphBuilder {
         previewLineData.getLines().get(array_offset+1).setPointRadius(2);
         previewLineData.getLines().get(array_offset+2).setPointRadius(2);
         return previewLineData;
+    }
+
+    public synchronized List<Line> defaultLines(boolean simple) {//KS TODO support simple
+        return defaultLines();
     }
 
     public List<Line> defaultLines() {
@@ -247,6 +265,10 @@ public class BgGraphBuilder {
     }
 
 
+    private void addBgReadingValues(final boolean simple) {//KS TODO Add Noise, Momentum Trend implmentation
+        addBgReadingValues();
+    }
+
     private void addBgReadingValues() {
         final boolean show_filtered = prefs.getBoolean("show_filtered_curve", false);
 
@@ -272,6 +294,22 @@ public class BgGraphBuilder {
         for (Calibration calibration : calibrations) {
             calibrationValues.add(new PointValueExtended((float) (calibration.timestamp / FUZZER), (float) unitized(calibration.bg)));
         }
+    }
+
+    public static synchronized double getCurrentLowOccursAt() {//KS TODO implement low predictions
+        try {
+            final long last_bg_reading_timestamp = BgReading.last().timestamp;
+            if (low_occurs_at_processed_till_timestamp < last_bg_reading_timestamp) {
+                Log.d(TAG, "Recalculating lowOccursAt: " + JoH.dateTimeText((long) low_occurs_at_processed_till_timestamp) + " vs " + JoH.dateTimeText(last_bg_reading_timestamp));
+                // new only the last hour worth of data for this
+                (new BgGraphBuilder(xdrip.getAppContext(), System.currentTimeMillis() - 60 * 60 * 1000, System.currentTimeMillis() + 5 * 60 * 1000, 24, true)).addBgReadingValues(false);
+            } else {
+                Log.d(TAG, "Cached current low timestamp ok: " +  JoH.dateTimeText((long) low_occurs_at_processed_till_timestamp) + " vs " + JoH.dateTimeText(last_bg_reading_timestamp));
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Got exception in getCurrentLowOccursAt() " + e);
+        }
+        return low_occurs_at;
     }
 
     public Line highLine(){ return highLine(LINE_VISIBLE);}
@@ -371,6 +409,13 @@ public class BgGraphBuilder {
         return (context.getResources().getConfiguration().screenLayout & Configuration.SCREENLAYOUT_SIZE_MASK) >= Configuration.SCREENLAYOUT_SIZE_LARGE;
     }
 
+    public static String noiseString(double thisnoise) {
+        if (thisnoise > NOISE_HIGH) return "Extreme";
+        if (thisnoise > NOISE_TOO_HIGH_FOR_PREDICT) return "Very High";
+        if (thisnoise > NOISE_TRIGGER) return "High";
+        return "Low";
+    }
+
     public Axis previewXAxis(){
         Axis previewXaxis = xAxis();
         previewXaxis.setTextSize(previewAxisTextSize);
@@ -410,7 +455,15 @@ public class BgGraphBuilder {
     }
 
     public double unitized(double value) {
-        if(doMgdl) {
+        if (doMgdl) {
+            return value;
+        } else {
+            return mmolConvert(value);
+        }
+    }
+
+    public static double unitized(double value, boolean doMgdl) {
+        if (doMgdl) {
             return value;
         } else {
             return mmolConvert(value);
@@ -418,23 +471,35 @@ public class BgGraphBuilder {
     }
 
     public String unitized_string(double value) {
+        return unitized_string(value, doMgdl);
+    }
+
+    public static String unitized_string_static(double value) {
+        return unitized_string(value, Pref.getString("units", "mgdl").equals("mgdl"));
+    }
+    public static String unitized_string_with_units_static(double value) {
+        final boolean domgdl = Pref.getString("units", "mgdl").equals("mgdl");
+        return unitized_string(value, domgdl)+" "+(domgdl ? "mg/dl" : "mmol/l");
+    }
+
+    public static String unitized_string(double value, boolean doMgdl) {
         DecimalFormat df = new DecimalFormat("#");
         if (value >= 400) {
             return "HIGH";
         } else if (value >= 40) {
-            if(doMgdl) {
+            if (doMgdl) {
                 df.setMaximumFractionDigits(0);
                 return df.format(value);
             } else {
                 df.setMaximumFractionDigits(1);
-                //next line ensures mmol/l value is XX.x always.  Required by PebbleSync, and probably not a bad idea.
+                //next line ensures mmol/l value is XX.x always.  Required by PebbleWatchSync, and probably not a bad idea.
                 df.setMinimumFractionDigits(1);
                 return df.format(mmolConvert(value));
             }
         } else if (value > 12) {
             return "LOW";
         } else {
-            switch((int)value) {
+            switch ((int) value) {
                 case 0:
                     return "??0";
                 case 1:
@@ -457,7 +522,83 @@ public class BgGraphBuilder {
         }
     }
 
+
     public String unitizedDeltaString(boolean showUnit, boolean highGranularity) {
+        return unitizedDeltaString( showUnit, highGranularity,Home.get_follower());
+    }
+
+    public String unitizedDeltaString(boolean showUnit, boolean highGranularity, boolean is_follower) {
+        return unitizedDeltaString(showUnit, highGranularity, is_follower, doMgdl);
+    }
+
+    public static String unitizedDeltaString(boolean showUnit, boolean highGranularity, boolean is_follower, boolean doMgdl) {
+
+        List<BgReading> last2 = BgReading.latest(2,is_follower);
+        if (last2.size() < 2 || last2.get(0).timestamp - last2.get(1).timestamp > 20 * 60 * 1000) {
+            // don't show delta if there are not enough values or the values are more than 20 mintes apart
+            return "???";
+        }
+
+        double value = BgReading.currentSlope(is_follower) * 5 * 60 * 1000;
+
+        return unitizedDeltaStringRaw(showUnit, highGranularity, value, doMgdl);
+    }
+
+    public String unitizedDeltaStringRaw(boolean showUnit, boolean highGranularity, double value) {
+        return unitizedDeltaStringRaw(showUnit, highGranularity, value, doMgdl);
+    }
+
+    public static String unitizedDeltaStringRaw(boolean showUnit, boolean highGranularity,double value, boolean doMgdl) {
+
+
+        if (Math.abs(value) > 100) {
+            // a delta > 100 will not happen with real BG values -> problematic sensor data
+            return "ERR";
+        }
+
+        // TODO: allow localization from os settings once pebble doesn't require english locale
+        DecimalFormat df = new DecimalFormat("#", new DecimalFormatSymbols(Locale.ENGLISH));
+        String delta_sign = "";
+        if (value > 0) {
+            delta_sign = "+";
+        }
+        if (doMgdl) {
+
+            if (highGranularity) {
+                df.setMaximumFractionDigits(1);
+            } else {
+                df.setMaximumFractionDigits(0);
+            }
+
+            return delta_sign + df.format(unitized(value,doMgdl)) + (showUnit ? " mg/dl" : "");
+        } else {
+            // only show 2 decimal places on mmol/l delta when less than 0.1 mmol/l
+            if (highGranularity && (Math.abs(value) < (Constants.MMOLL_TO_MGDL * 0.1))) {
+                df.setMaximumFractionDigits(2);
+            } else {
+                df.setMaximumFractionDigits(1);
+            }
+
+            df.setMinimumFractionDigits(1);
+            df.setMinimumIntegerDigits(1);
+            return delta_sign + df.format(unitized(value,doMgdl)) + (showUnit ? " mmol/l" : "");
+        }
+    }
+
+    public String unit() {
+        return unit(doMgdl);
+    }
+
+    public static String unit(boolean doMgdl) {
+        if (doMgdl) {
+            return "mg/dl";
+        } else {
+            return "mmol";
+        }
+    }
+
+
+    public String oldunitizedDeltaString(boolean showUnit, boolean highGranularity) {
 
         List<BgReading> last2 = BgReading.latest(2);
         if(last2.size() < 2 || last2.get(0).timestamp - last2.get(1).timestamp > MAX_SLOPE_MINUTES * 60 * 1000){
@@ -504,14 +645,6 @@ public class BgGraphBuilder {
         return mgdl * Constants.MGDL_TO_MMOLL;
     }
 
-    public String unit() {
-        if(doMgdl){
-            return "mg/dl";
-        } else {
-            return "mmol";
-        }
-
-    }
 
     public OnValueSelectTooltipListener getOnValueSelectTooltipListener(){
         return new OnValueSelectTooltipListener();

@@ -10,6 +10,9 @@ import com.activeandroid.Model;
 import com.activeandroid.annotation.Column;
 import com.activeandroid.annotation.Table;
 import com.activeandroid.query.Select;
+import com.eveningoutpost.dexdrip.UtilityModels.Constants;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
+import com.eveningoutpost.dexdrip.utils.CheckBridgeBattery;
 import com.eveningoutpost.dexdrip.utils.DexCollectionType;
 import com.google.gson.annotations.Expose;
 
@@ -19,7 +22,7 @@ import java.util.Date;
 import java.util.UUID;
 
 /**
- * Created by stephenblack on 11/6/14.
+ * Created by Emma Black on 11/6/14.
  */
 
 @Table(name = "TransmitterData", id = BaseColumns._ID)
@@ -48,81 +51,95 @@ public class TransmitterData extends Model {
 
     public static synchronized TransmitterData create(byte[] buffer, int len, Long timestamp) {
         if (len < 6) { return null; }
-        TransmitterData transmitterData = new TransmitterData();
-        if ((buffer[0] == 0x11 || buffer[0] == 0x15) && buffer[1] == 0x00) {
-            //this is a dexbridge packet.  Process accordingly.
-            Log.i(TAG, "create Processing a Dexbridge packet");
-            ByteBuffer txData = ByteBuffer.allocate(len);
-            txData.order(ByteOrder.LITTLE_ENDIAN);
-            txData.put(buffer, 0, len);
-            transmitterData.raw_data = txData.getInt(2);
-            transmitterData.filtered_data = txData.getInt(6);
-            //  bitwise and with 0xff (1111....1) to avoid that the byte is treated as signed.
-            transmitterData.sensor_battery_level = txData.get(10) & 0xff;
-            if (buffer[0] == 0x15) {
-                Log.i(TAG, "create Processing a Dexbridge packet includes delay information");
-                transmitterData.timestamp = timestamp - txData.getInt(16);
-            } else {
-                transmitterData.timestamp = timestamp;
-            }
-            Log.i(TAG, "Created transmitterData record with Raw value of " + transmitterData.raw_data + " and Filtered value of " + transmitterData.filtered_data + " at " + timestamp + " with timestamp " + transmitterData.timestamp);
-        } else { //this is NOT a dexbridge packet.  Process accordingly.
-            Log.i(TAG, "create Processing a BTWixel or IPWixel packet");
-            StringBuilder data_string = new StringBuilder();
-            for (int i = 0; i < len; ++i) { data_string.append((char) buffer[i]); }
-            final String[] data = data_string.toString().split("\\s+");
+        final TransmitterData transmitterData = new TransmitterData();
+        try {
+            if ((buffer[0] == 0x11 || buffer[0] == 0x15) && buffer[1] == 0x00) {
+                //this is a dexbridge packet.  Process accordingly.
+                Log.i(TAG, "create Processing a Dexbridge packet");
+                final ByteBuffer txData = ByteBuffer.allocate(len);
+                txData.order(ByteOrder.LITTLE_ENDIAN);
+                txData.put(buffer, 0, len);
+                transmitterData.raw_data = txData.getInt(2);
+                transmitterData.filtered_data = txData.getInt(6);
+                //  bitwise and with 0xff (1111....1) to avoid that the byte is treated as signed.
+                transmitterData.sensor_battery_level = txData.get(10) & 0xff;
+                if (buffer[0] == 0x15) {
+                    Log.i(TAG, "create Processing a Dexbridge packet includes delay information");
+                    transmitterData.timestamp = timestamp - txData.getInt(16);
+                } else {
+                    transmitterData.timestamp = timestamp;
+                }
+                Log.i(TAG, "Created transmitterData record with Raw value of " + transmitterData.raw_data + " and Filtered value of " + transmitterData.filtered_data + " at " + timestamp + " with timestamp " + transmitterData.timestamp);
+            } else { //this is NOT a dexbridge packet.  Process accordingly.
+                Log.i(TAG, "create Processing a BTWixel or IPWixel packet");
+                StringBuilder data_string = new StringBuilder();
+                for (int i = 0; i < len; ++i) {
+                    data_string.append((char) buffer[i]);
+                }
+                final String[] data = data_string.toString().split("\\s+");
 
-            if (data.length > 1) {
-                transmitterData.sensor_battery_level = Integer.parseInt(data[1]);
-                if (data.length > 2) {
-                    try {
-                        Home.setPreferencesInt("bridge_battery", Integer.parseInt(data[2]));
-                        if (Home.get_master())
-                            GcmActivity.sendBridgeBattery(Home.getPreferencesInt("bridge_battery", -1));
-                    } catch (Exception e) {
-                        Log.e(TAG, "Got exception processing classic wixel or limitter battery value: " + e.toString());
-                    }
-                    if (data.length > 3) {
-                        if (DexCollectionType.getDexCollectionType() == DexCollectionType.LimiTTer) {
-                            try {
-                                // reported sensor age in minutes
-                                final Integer sensorAge = Integer.parseInt(data[3]);
-                                if ((sensorAge > 0) && (sensorAge < 200000))
-                                    Home.setPreferencesInt("nfc_sensor_age", sensorAge);
-                            } catch (Exception e) {
-                                Log.e(TAG, "Got exception processing field 4 in classic limitter protocol: " + e);
+                if (data.length > 1) {
+                    transmitterData.sensor_battery_level = Integer.parseInt(data[1]);
+                    if (data.length > 2) {
+                        try {
+                            Pref.setInt("bridge_battery", Integer.parseInt(data[2]));
+                            if (Home.get_master()) {
+                                GcmActivity.sendBridgeBattery(Pref.getInt("bridge_battery", -1));
+                            }
+                            CheckBridgeBattery.checkBridgeBattery();
+                        } catch (Exception e) {
+                            Log.e(TAG, "Got exception processing classic wixel or limitter battery value: " + e.toString());
+                        }
+                        if (data.length > 3) {
+                            if ((DexCollectionType.getDexCollectionType() == DexCollectionType.LimiTTer)
+                                    && (!Pref.getBooleanDefaultFalse("use_transmiter_pl_bluetooth"))) {
+                                try {
+                                    // reported sensor age in minutes
+                                    final Integer sensorAge = Integer.parseInt(data[3]);
+                                    if ((sensorAge > 0) && (sensorAge < 200000))
+                                        Pref.setInt("nfc_sensor_age", sensorAge);
+                                } catch (Exception e) {
+                                    Log.e(TAG, "Got exception processing field 4 in classic limitter protocol: " + e);
+                                }
                             }
                         }
                     }
                 }
+                transmitterData.raw_data = Integer.parseInt(data[0]);
+                transmitterData.filtered_data = Integer.parseInt(data[0]);
+                // TODO process does_have_filtered_here with extended protocol
+                transmitterData.timestamp = timestamp;
             }
-            transmitterData.raw_data = Integer.parseInt(data[0]);
-            transmitterData.filtered_data = Integer.parseInt(data[0]);
-            // TODO process does_have_filtered_here with extended protocol
-            transmitterData.timestamp = timestamp;
-        }
 
-        //Stop allowing readings that are older than the last one - or duplicate data, its bad! (from savek-cc)
-        final TransmitterData lastTransmitterData = TransmitterData.last();
-        if (lastTransmitterData != null && lastTransmitterData.timestamp >= timestamp) {
-            return null;
-        }
-        if (lastTransmitterData != null && lastTransmitterData.raw_data == transmitterData.raw_data && Math.abs(lastTransmitterData.timestamp - timestamp) < (120000)) {
-            return null;
-        }
-        final Calibration lastCalibration = Calibration.lastValid();
-        if (lastCalibration != null && lastCalibration.timestamp > timestamp) {
-            return null;
-        }
+            //Stop allowing readings that are older than the last one - or duplicate data, its bad! (from savek-cc)
+            final TransmitterData lastTransmitterData = TransmitterData.last();
+            if (lastTransmitterData != null && lastTransmitterData.timestamp >= transmitterData.timestamp) {
+                Log.e(TAG, "Rejecting TransmitterData constraint: last: " + JoH.dateTimeText(lastTransmitterData.timestamp) + " >= this: " + JoH.dateTimeText(transmitterData.timestamp));
+                return null;
+            }
+            if (lastTransmitterData != null && lastTransmitterData.raw_data == transmitterData.raw_data && Math.abs(lastTransmitterData.timestamp - transmitterData.timestamp) < (Constants.MINUTE_IN_MS * 2)) {
+                Log.e(TAG, "Rejecting identical TransmitterData constraint: last: " + JoH.dateTimeText(lastTransmitterData.timestamp) + " due to 2 minute rule this: " + JoH.dateTimeText(transmitterData.timestamp));
+                return null;
+            }
+            final Calibration lastCalibration = Calibration.lastValid();
+            if (lastCalibration != null && lastCalibration.timestamp > transmitterData.timestamp) {
+                Log.e(TAG, "Rejecting historical TransmitterData constraint: calib: " + JoH.dateTimeText(lastCalibration.timestamp) + " > this: " + JoH.dateTimeText(transmitterData.timestamp));
+                return null;
+            }
 
-        transmitterData.uuid = UUID.randomUUID().toString();
-        transmitterData.save();
-        return transmitterData;
+            transmitterData.uuid = UUID.randomUUID().toString();
+            transmitterData.save();
+            return transmitterData;
+        }catch(Exception e)
+        {
+            Log.e(TAG, "Got exception processing fields in protocol: " + e);
+        }
+        return null;
     }
 
     public static synchronized TransmitterData create(int raw_data, int filtered_data, int sensor_battery_level, long timestamp) {
         TransmitterData lastTransmitterData = TransmitterData.last();
-        if (lastTransmitterData != null && lastTransmitterData.raw_data == raw_data && Math.abs(lastTransmitterData.timestamp - new Date().getTime()) < (120000)) { //Stop allowing duplicate data, its bad!
+        if (lastTransmitterData != null && lastTransmitterData.raw_data == raw_data && Math.abs(lastTransmitterData.timestamp - new Date().getTime()) < (Constants.MINUTE_IN_MS * 2)) { //Stop allowing duplicate data, its bad!
             return null;
         }
 
@@ -138,7 +155,7 @@ public class TransmitterData extends Model {
 
     public static synchronized TransmitterData create(int raw_data ,int sensor_battery_level, long timestamp) {
         TransmitterData lastTransmitterData = TransmitterData.last();
-        if (lastTransmitterData != null && lastTransmitterData.raw_data == raw_data && Math.abs(lastTransmitterData.timestamp - new Date().getTime()) < (120000)) { //Stop allowing duplicate data, its bad!
+        if (lastTransmitterData != null && lastTransmitterData.raw_data == raw_data && Math.abs(lastTransmitterData.timestamp - new Date().getTime()) < (Constants.MINUTE_IN_MS * 2)) { //Stop allowing duplicate data, its bad!
             return null;
         }
 
@@ -155,6 +172,13 @@ public class TransmitterData extends Model {
         return new Select()
                 .from(TransmitterData.class)
                 .orderBy("_ID desc")
+                .executeSingle();
+    }
+
+    public static TransmitterData lastByTimestamp() {
+        return new Select()
+                .from(TransmitterData.class)
+                .orderBy("timestamp desc")
                 .executeSingle();
     }
 

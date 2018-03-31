@@ -1,7 +1,7 @@
 package com.eveningoutpost.dexdrip.UtilityModels;
 
-import android.app.AlarmManager;
 import android.annotation.TargetApi;
+import android.app.AlarmManager;
 import android.app.IntentService;
 import android.app.Notification;
 import android.app.NotificationManager;
@@ -11,6 +11,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.drawable.Icon;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
@@ -19,20 +20,14 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.preference.PreferenceManager;
 import android.support.v4.app.NotificationCompat;
 import android.support.v4.app.NotificationManagerCompat;
-import android.text.Html;
 import android.text.SpannableString;
-import android.text.style.StrikethroughSpan;
-import android.text.style.UnderlineSpan;
-import android.widget.TextView;
-
-import com.eveningoutpost.dexdrip.BestGlucose;
-import com.eveningoutpost.dexdrip.Models.JoH;
-import com.eveningoutpost.dexdrip.Models.UserError.Log;
 
 import com.eveningoutpost.dexdrip.AddCalibration;
+import com.eveningoutpost.dexdrip.BestGlucose;
 import com.eveningoutpost.dexdrip.DoubleCalibrationActivity;
 import com.eveningoutpost.dexdrip.EditAlertActivity;
 import com.eveningoutpost.dexdrip.Home;
@@ -41,29 +36,34 @@ import com.eveningoutpost.dexdrip.Models.AlertType;
 import com.eveningoutpost.dexdrip.Models.BgReading;
 import com.eveningoutpost.dexdrip.Models.Calibration;
 import com.eveningoutpost.dexdrip.Models.CalibrationRequest;
+import com.eveningoutpost.dexdrip.Models.JoH;
+import com.eveningoutpost.dexdrip.Models.Sensor;
+import com.eveningoutpost.dexdrip.Models.UserError.Log;
 import com.eveningoutpost.dexdrip.Models.UserNotification;
+import com.eveningoutpost.dexdrip.R;
 import com.eveningoutpost.dexdrip.Services.ActivityRecognizedService;
 import com.eveningoutpost.dexdrip.Services.MissedReadingService;
 import com.eveningoutpost.dexdrip.Services.SnoozeOnNotificationDismissService;
-import com.eveningoutpost.dexdrip.R;
-import com.eveningoutpost.dexdrip.Models.Sensor;
+import com.eveningoutpost.dexdrip.ui.NumberGraphic;
 import com.eveningoutpost.dexdrip.utils.DexCollectionType;
+import com.eveningoutpost.dexdrip.utils.PowerStateReceiver;
 import com.eveningoutpost.dexdrip.xdrip;
 
 import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
-import static com.eveningoutpost.dexdrip.UtilityModels.ColorCache.getCol;
 import static com.eveningoutpost.dexdrip.UtilityModels.ColorCache.X;
+import static com.eveningoutpost.dexdrip.UtilityModels.ColorCache.getCol;
 
 /**
- * Created by stephenblack on 11/28/14.
+ * Created by Emma Black on 11/28/14.
  */
 public class Notifications extends IntentService {
     public static final long[] vibratePattern = {0, 1000, 300, 1000, 300, 1000};
     public static boolean bg_notifications;
+    public static boolean bg_notifications_watch;
+    public static boolean bg_persistent_high_alert_enabled_watch;
     public static boolean bg_ongoing;
     public static boolean bg_vibrate;
     public static boolean bg_lights;
@@ -94,12 +94,12 @@ public class Notifications extends IntentService {
     Bitmap iconBitmap;
     Bitmap notifiationBitmap;
 
-    final int BgNotificationId = 001;
-    final int calibrationNotificationId = 002;
-    final int doubleCalibrationNotificationId = 003;
-    final int extraCalibrationNotificationId = 004;
+    final static int BgNotificationId = 001;
+    final static int calibrationNotificationId = 002;
+    final static int doubleCalibrationNotificationId = 003;
+    final static int extraCalibrationNotificationId = 004;
     public static final int exportCompleteNotificationId = 005;
-    final int ongoingNotificationId = 8811;
+    final static int ongoingNotificationId = 8811;
     public static final int exportAlertNotificationId = 006;
     public static final int uncleanAlertNotificationId = 007;
     public static final int missedAlertNotificationId = 010;
@@ -109,6 +109,11 @@ public class Notifications extends IntentService {
     public static final int parakeetMissingId = 014;
     public static final int persistentHighAlertNotificationId = 015;
     private static boolean low_notifying = false;
+
+    private static final int CALIBRATION_REQUEST_MAX_FREQUENCY = (60 * 60 * 6); // don't bug for extra calibrations more than every 6 hours
+    private static final int CALIBRATION_REQUEST_MIN_FREQUENCY = (60 * 60 * 8); // don't bug for general calibrations more than every 8 hours
+
+
     SharedPreferences prefs;
 
     public Notifications() {
@@ -126,7 +131,7 @@ public class Notifications extends IntentService {
             Log.d("Notifications", "Running Notifications Intent Service");
             final Context context = getApplicationContext();
 
-            if (Home.getPreferencesBoolean("motion_tracking_enabled", false)) {
+            if (Pref.getBoolean("motion_tracking_enabled", false)) {
                 ActivityRecognizedService.reStartActivityRecogniser(context);
             }
 
@@ -155,6 +160,8 @@ public class Notifications extends IntentService {
         mContext = context;
         prefs = PreferenceManager.getDefaultSharedPreferences(context);
         bg_notifications = prefs.getBoolean("bg_notifications", true);
+        bg_notifications_watch = PersistentStore.getBoolean("bg_notifications_watch");
+        bg_persistent_high_alert_enabled_watch = PersistentStore.getBoolean("persistent_high_alert_enabled_watch");
         bg_vibrate = prefs.getBoolean("bg_vibrate", true);
         bg_lights = prefs.getBoolean("bg_lights", true);
         bg_sound = prefs.getBoolean("bg_play_sound", true);
@@ -316,7 +323,11 @@ public class Notifications extends IntentService {
         }
         
         boolean unclearReading = BgReading.getAndRaiseUnclearReading(context);
-        
+
+        boolean forced_wear = Home.get_forced_wear();
+        Log.d(TAG, "forced_wear=" + forced_wear + " bg_notifications_watch=" + bg_notifications_watch + " persistent_high_alert_enabled_watch=" + bg_persistent_high_alert_enabled_watch);
+
+        //boolean watchAlert = (Home.get_forced_wear() && bg_notifications_watch);
         if (unclearReading) {
             AlertPlayer.getPlayer().stopAlert(context, false, true);
         } else {
@@ -325,16 +336,16 @@ public class Notifications extends IntentService {
             BgReading.checkForRisingAllert(context);
         }
         // TODO: Add this alerts as well to depend on unclear sensor reading.
+        //if (watchAlert && bg_persistent_high_alert_enabled_watch) {
         BgReading.checkForPersistentHigh();
         evaluateLowPredictionAlarm();
         reportNoiseChanges();
 
 
         Sensor sensor = Sensor.currentSensor();
-
         // TODO need to check performance of rest of this method when in follower mode
-        List<BgReading> bgReadings = BgReading.latest(3);
-        List<Calibration> calibrations = Calibration.allForSensorInLastFourDays();
+        final List<BgReading> bgReadings = BgReading.latest(3);
+        final List<Calibration> calibrations = Calibration.allForSensorLimited(3);
         if (bgReadings == null || bgReadings.size() < 3) {
             return unclearReading;
         }
@@ -344,11 +355,22 @@ public class Notifications extends IntentService {
         BgReading bgReading = bgReadings.get(0);
 
         if (calibration_notifications) {
+
+            int calibration_reminder_secs = 0;
+            try {
+                calibration_reminder_secs = Integer.parseInt(Pref.getString("calibration_reminder_hours","0")) * 60 * 60;
+                Log.d(TAG,"Calibration reminder seconds: "+calibration_reminder_secs);
+            } catch (Exception e) {
+                Log.wtf(TAG,"Could not parse calibration_reminder_hours");
+            }
+
+            // TODO this should only clear double calibration once after calibrations are achieved
             if (bgReadings.size() >= 3) {
                 if (calibrations.size() == 0 && (new Date().getTime() - bgReadings.get(2).timestamp <= (60000 * 30)) && sensor != null) {
                     if ((sensor.started_at + (60000 * 60 * 2)) < new Date().getTime()) {
                         doubleCalibrationRequest();
                     } else {
+                        // TODO should be aware of state
                         clearDoubleCalibrationRequest();
                     }
                 } else {
@@ -357,15 +379,28 @@ public class Notifications extends IntentService {
             } else {
                 clearDoubleCalibrationRequest();
             }
+            // bgreadings criteria possibly needs a review
             if (CalibrationRequest.shouldRequestCalibration(bgReading) && (new Date().getTime() - bgReadings.get(2).timestamp <= (60000 * 24))) {
-                extraCalibrationRequest();
+                if ((!PowerStateReceiver.is_power_connected()) || (Pref.getBooleanDefaultFalse("calibration_alerts_while_charging"))) {
+                    if (JoH.pratelimit("calibration-request-notification", Math.max(CALIBRATION_REQUEST_MAX_FREQUENCY, calibration_reminder_secs))) {
+                        extraCalibrationRequest();
+                    }
+                }
             } else {
+                // TODO should be aware of state
                 clearExtraCalibrationRequest();
             }
-            if (calibrations.size() >= 1 && Math.abs((new Date().getTime() - calibrations.get(0).timestamp)) / (1000 * 60 * 60) > 12) {
+            // questionable use of abs for time since
+            if (calibrations.size() >= 1 && (Math.abs(JoH.msSince(calibrations.get(0).timestamp)) > (calibration_reminder_secs * 1000))
+                    && (CalibrationRequest.isSlopeFlatEnough(BgReading.last(true)))) {
                 Log.d("NOTIFICATIONS", "Calibration difference in hours: " + ((new Date().getTime() - calibrations.get(0).timestamp)) / (1000 * 60 * 60));
-                calibrationRequest();
+                if ((!PowerStateReceiver.is_power_connected()) || (Pref.getBooleanDefaultFalse("calibration_alerts_while_charging"))) {
+                    if (JoH.pratelimit("calibration-request-notification", Math.max(CALIBRATION_REQUEST_MIN_FREQUENCY, calibration_reminder_secs)) || Pref.getBooleanDefaultFalse("calibration_alerts_repeat")) {
+                        calibrationRequest();
+                    }
+                }
             } else {
+                // TODO should be aware of state
                 clearCalibrationRequest();
             }
 
@@ -482,7 +517,7 @@ public class Notifications extends IntentService {
         
         AlarmManager alarm = (AlarmManager) getSystemService(ALARM_SERVICE);
 
-        
+        // TODO use JoH wakeup
         Log.d("Notifications" , "ArmTimer waking at: "+ new Date(wakeTime ) +" in " +
             (wakeTime - now) /60000d + " minutes");
         if (wakeIntent != null)
@@ -515,7 +550,7 @@ public class Notifications extends IntentService {
         return createWearBitmap(System.currentTimeMillis() - 60000 * 60 * hours, System.currentTimeMillis());
     }
 
-    private Notification createExtensionPage(long hours) {
+   /* private Notification createExtensionPage(long hours) {
         return new NotificationCompat.Builder(mContext)
                 .extend(new NotificationCompat.WearableExtender()
                                 .setBackground(createWearBitmap(hours))
@@ -523,7 +558,7 @@ public class Notifications extends IntentService {
                                 .setHintAvoidBackgroundClipping(true)
                 )
                 .build();
-    }
+    }*/
 
     @TargetApi(Build.VERSION_CODES.JELLY_BEAN)
     public synchronized Notification createOngoingNotification(BgGraphBuilder bgGraphBuilder, Context context) {
@@ -545,9 +580,17 @@ public class Notifications extends IntentService {
                         PendingIntent.FLAG_UPDATE_CURRENT
                 );
 
-        NotificationCompat.Builder b = new NotificationCompat.Builder(mContext);
-        //b.setOngoing(true);
-        b.setCategory(NotificationCompat.CATEGORY_STATUS);
+        //final NotificationCompat.Builder b = new NotificationCompat.Builder(mContext, NotificationChannels.ONGOING_CHANNEL);
+        //final NotificationCompat.Builder b = new NotificationCompat.Builder(mContext); // temporary fix until ONGOING CHANNEL is silent by default on android 8+
+        final Notification.Builder b = new Notification.Builder(mContext); // temporary fix until ONGOING CHANNEL is silent by default on android 8+
+        //b.setOngoing(true); // TODO CHECK THIS!!
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            b.setVisibility(Pref.getBooleanDefaultFalse("public_notifications") ? Notification.VISIBILITY_PUBLIC : Notification.VISIBILITY_PRIVATE);
+            b.setCategory(NotificationCompat.CATEGORY_STATUS);
+        }
+        if (Pref.getBooleanDefaultFalse("high_priority_notifications")) {
+            b.setPriority(Notification.PRIORITY_HIGH);
+        }
         final BestGlucose.DisplayGlucose dg = (use_best_glucose) ? BestGlucose.getDisplayGlucose() : null;
         final boolean use_color_in_notification = false; // could be preference option
         final SpannableString titleString = new SpannableString(lastReading == null ? "BG Reading Unavailable" : (dg != null) ? (dg.spannableString(dg.unitized + " " + dg.delta_arrow,use_color_in_notification))
@@ -556,6 +599,20 @@ public class Notifications extends IntentService {
                 .setContentText("xDrip Data collection service is running.")
                 .setSmallIcon(R.drawable.ic_action_communication_invert_colors_on)
                 .setUsesChronometer(false);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // in case the graphic crashes the system-ui we wont do it immediately after reboot so the
+            // user has a chance to disable the feature
+            if (SystemClock.uptimeMillis() > Constants.MINUTE_IN_MS * 15) {
+                if (NumberGraphic.numberIconEnabled()) {
+                    if ((dg != null) && (!dg.isStale())) {
+                        final Bitmap icon_bitmap = NumberGraphic.getBitmap(dg.unitized);
+                        if (icon_bitmap != null) b.setSmallIcon(Icon.createWithBitmap(icon_bitmap));
+                    }
+                }
+            }
+        }
+
         if (lastReading != null) {
 
             b.setWhen(lastReading.timestamp);
@@ -571,7 +628,7 @@ public class Notifications extends IntentService {
                     .setBackgroundColor(getCol(X.color_notification_chart_background))
                     .build();
             b.setLargeIcon(iconBitmap);
-            NotificationCompat.BigPictureStyle bigPictureStyle = new NotificationCompat.BigPictureStyle();
+            Notification.BigPictureStyle bigPictureStyle = new Notification.BigPictureStyle();
             notifiationBitmap = new BgSparklineBuilder(mContext)
                     .setBgGraphBuilder(bgGraphBuilder)
                     .showHighLine()
@@ -579,14 +636,18 @@ public class Notifications extends IntentService {
                     .setStart(System.currentTimeMillis() - 60000 * 60 * 3)
                     .showAxes(true)
                     .setBackgroundColor(getCol(X.color_notification_chart_background))
-                    .setShowFiltered(DexCollectionType.hasFiltered() && Home.getPreferencesBooleanDefaultFalse("show_filtered_curve"))
+                    .setShowFiltered(DexCollectionType.hasFiltered() && Pref.getBooleanDefaultFalse("show_filtered_curve"))
                     .build();
             bigPictureStyle.bigPicture(notifiationBitmap)
                     .setSummaryText(deltaString)
                     .setBigContentTitle(titleString);
             b.setStyle(bigPictureStyle);
+
         }
         b.setContentIntent(resultPendingIntent);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+            b.setLocalOnly(true);
+        }
         return b.build();
     }
 
@@ -687,7 +748,8 @@ public class Notifications extends IntentService {
     }
 
     private void calibrationNotificationCreate(String title, String content, Intent intent, int notificationId) {
-        NotificationCompat.Builder mBuilder = notificationBuilder(title, content, intent);
+        NotificationCompat.Builder mBuilder = notificationBuilder(title, content, intent, NotificationChannels.CALIBRATION_CHANNEL);
+        mBuilder.setVisibility(Pref.getBooleanDefaultFalse("public_notifications") ? Notification.VISIBILITY_PUBLIC : Notification.VISIBILITY_PRIVATE);
         mBuilder.setVibrate(vibratePattern);
         mBuilder.setLights(0xff00ff00, 300, 1000);
         if(calibration_override_silent) {
@@ -696,16 +758,24 @@ public class Notifications extends IntentService {
             mBuilder.setSound(Uri.parse(calibration_notification_sound));
         }
 
+
+
         NotificationManager mNotifyMgr = (NotificationManager) mContext.getSystemService(Context.NOTIFICATION_SERVICE);
-        mNotifyMgr.cancel(notificationId);
-        mNotifyMgr.notify(notificationId, mBuilder.build());
+        //mNotifyMgr.cancel(notificationId);
+        mNotifyMgr.notify(notificationId, XdripNotificationCompat.build(mBuilder));
     }
 
     private NotificationCompat.Builder notificationBuilder(String title, String content, Intent intent) {
-        return new NotificationCompat.Builder(mContext)
+        return notificationBuilder(title, content, intent, null);
+    }
+
+    private NotificationCompat.Builder notificationBuilder(String title, String content, Intent intent, String channelId) {
+        return new NotificationCompat.Builder(mContext, channelId)
+                .setVisibility(Pref.getBooleanDefaultFalse("public_notifications") ? Notification.VISIBILITY_PUBLIC : Notification.VISIBILITY_PRIVATE)
                 .setSmallIcon(R.drawable.ic_action_communication_invert_colors_on)
                 .setContentTitle(title)
                 .setContentText(content)
+                .setPriority(Pref.getBooleanDefaultFalse("high_priority_notifications") ? Notification.PRIORITY_MAX : Notification.PRIORITY_HIGH)
                 .setContentIntent(notificationIntent(intent));
     }
 
@@ -721,10 +791,13 @@ public class Notifications extends IntentService {
     private void calibrationRequest() {
         UserNotification userNotification = UserNotification.lastCalibrationAlert();
         if ((userNotification == null) || (userNotification.timestamp <= ((new Date().getTime()) - (60000 * calibration_snooze)))) {
-            if (userNotification != null) { userNotification.delete(); }
-            UserNotification.create("12 hours since last Calibration  (@" + JoH.hourMinuteString() + ")", "calibration_alert", new Date().getTime());
+            if (userNotification != null) {
+                userNotification.delete();
+            }
+            final long calibration_hours = Calibration.msSinceLastCalibration() / (1000 * 60 * 60);
+            UserNotification.create(calibration_hours + " hours since last Calibration  (@" + JoH.hourMinuteString() + ")", "calibration_alert", new Date().getTime());
             String title = "Calibration Needed";
-            String content = "12 hours since last calibration";
+            String content = calibration_hours + " hours since last calibration";
             Intent intent = new Intent(mContext, AddCalibration.class);
             calibrationNotificationCreate(title, content, intent, calibrationNotificationId);
         }
@@ -747,8 +820,8 @@ public class Notifications extends IntentService {
         if ((userNotification == null) || (userNotification.timestamp <= ((new Date().getTime()) - (60000 * calibration_snooze)))) {
             if (userNotification != null) { userNotification.delete(); }
             UserNotification.create("Extra Calibration Requested", "extra_calibration_alert", new Date().getTime());
-            String title = "Calibration Needed";
-            String content = "A calibration entered now will GREATLY increase performance" + "  (@" + JoH.hourMinuteString() + ")";
+            String title = "Calibration Requested";
+            String content = "Increase performance by calibrating now" + "  (@" + JoH.hourMinuteString() + ")";
             Intent intent = new Intent(mContext, AddCalibration.class);
             calibrationNotificationCreate(title, content, intent, extraCalibrationNotificationId);
         }
@@ -756,12 +829,12 @@ public class Notifications extends IntentService {
 
     public static void bgUnclearAlert(Context context) {
         long otherAlertReraiseSec = MissedReadingService.getOtherAlertReraiseSec(context, "bg_unclear_readings_alert");
-        OtherAlert(context, "bg_unclear_readings_alert", "Unclear Sensor Readings" + "  (@" + JoH.hourMinuteString() + ")", uncleanAlertNotificationId, true, otherAlertReraiseSec);
+        OtherAlert(context, "bg_unclear_readings_alert", "Unclear Sensor Readings" + "  (@" + JoH.hourMinuteString() + ")", uncleanAlertNotificationId, NotificationChannels.BG_ALERT_CHANNEL, true, otherAlertReraiseSec);
     }
 
     public static void bgMissedAlert(Context context) {
         long otherAlertReraiseSec = MissedReadingService.getOtherAlertReraiseSec(context, "bg_missed_alerts");
-        OtherAlert(context, "bg_missed_alerts", "BG Readings Missed" + "  (@" + JoH.hourMinuteString() + ")", missedAlertNotificationId, true, otherAlertReraiseSec);
+        OtherAlert(context, "bg_missed_alerts", "BG Readings Missed" + "  (@" + JoH.hourMinuteString() + ")", missedAlertNotificationId, NotificationChannels.BG_MISSED_ALERT_CHANNEL, true, otherAlertReraiseSec);
     }
 
     public static void RisingAlert(Context context, boolean on) {
@@ -774,8 +847,11 @@ public class Notifications extends IntentService {
     public static void lowPredictAlert(Context context, boolean on, String msg) {
         final String type = "bg_predict_alert";
         if (on) {
-            if ((Home.getPreferencesLong("alerts_disabled_until", 0) < JoH.tsl()) && (Home.getPreferencesLong("low_alerts_disabled_until", 0) < JoH.tsl())) {
-                OtherAlert(context, type, msg, lowPredictAlertNotificationId, false,  20 * 60);
+            if ((Pref.getLong("alerts_disabled_until", 0) < JoH.tsl()) && (Pref.getLong("low_alerts_disabled_until", 0) < JoH.tsl())) {
+                OtherAlert(context, type, msg, lowPredictAlertNotificationId, NotificationChannels.BG_PREDICTED_LOW_CHANNEL, false, 20 * 60);
+                if (Pref.getBooleanDefaultFalse("speak_alerts")) {
+                   if (JoH.pratelimit("low-predict-speak", 1800)) SpeechUtil.say(msg, 4000);
+                }
             } else {
                 Log.ueh(TAG, "Not Low predict alerting due to snooze: " + msg);
             }
@@ -789,16 +865,21 @@ public class Notifications extends IntentService {
     public static void persistentHighAlert(Context context, boolean on, String msg) {
         final String type = "persistent_high_alert";
         if (on) {
-            if ((Home.getPreferencesLong("alerts_disabled_until", 0) < JoH.tsl()) && (Home.getPreferencesLong("high_alerts_disabled_until", 0) < JoH.tsl())) {
+            if ((Pref.getLong("alerts_disabled_until", 0) < JoH.tsl()) && (Pref.getLong("high_alerts_disabled_until", 0) < JoH.tsl())) {
                 int snooze_time = 20;
                 try {
-                    snooze_time = Integer.parseInt(Home.getPreferencesStringWithDefault("persistent_high_repeat_mins", "20"));
+                    snooze_time = Integer.parseInt(Pref.getString("persistent_high_repeat_mins", "20"));
                 } catch (NumberFormatException e) {
                     Log.e(TAG, "Invalid snooze time for persistent high");
                 }
                 if (snooze_time < 1) snooze_time = 1;       // not less than 1 minute
                 if (snooze_time > 1440) snooze_time = 1440; // not more than 1 day
-                OtherAlert(context, type, msg, persistentHighAlertNotificationId, false, snooze_time * 60);
+                OtherAlert(context, type, msg, persistentHighAlertNotificationId, NotificationChannels.BG_PERSISTENT_HIGH_CHANNEL, false, snooze_time * 60);
+                if (Pref.getBooleanDefaultFalse("speak_alerts")) {
+                    if (JoH.pratelimit("persist-high-speak", 1800)) {
+                        SpeechUtil.say(msg, 4000);
+                    }
+                }
             } else {
                 Log.ueh(TAG, "Not persistent high alerting due to snooze: " + msg);
             }
@@ -812,7 +893,7 @@ public class Notifications extends IntentService {
     public static void RiseDropAlert(Context context, boolean on, String type, String message, int notificatioId) {
         if(on) {
          // This alerts will only happen once. Want to have maxint, but not create overflow.
-            OtherAlert(context, type, message, notificatioId, false, Integer.MAX_VALUE / 100000);
+            OtherAlert(context, type, message, notificatioId, NotificationChannels.BG_RISE_DROP_CHANNEL, false, Integer.MAX_VALUE / 100000);
         } else {
             NotificationManager mNotifyMgr = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             mNotifyMgr.cancel(notificatioId);
@@ -820,7 +901,7 @@ public class Notifications extends IntentService {
         }
     }
 
-    private static void OtherAlert(Context context, String type, String message, int notificatioId, boolean addDeleteIntent, long reraiseSec) {
+    private static void OtherAlert(Context context, String type, String message, int notificatioId, String channelId, boolean addDeleteIntent, long reraiseSec) {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
         String otherAlertsSound = prefs.getString(type+"_sound",prefs.getString("other_alerts_sound", "content://settings/system/notification_sound"));
         Boolean otherAlertsOverrideSilent = prefs.getBoolean("other_alerts_override_silent", false);
@@ -839,16 +920,24 @@ public class Notifications extends IntentService {
             UserNotification.create(message, type, new Date().getTime() + reraiseSec * 1000);
 
 
+            boolean localOnly =false;
+            if (notificatioId == persistentHighAlertNotificationId) {
+                localOnly = (Home.get_forced_wear() && bg_notifications_watch && bg_persistent_high_alert_enabled_watch);
+            }
+            Log.d(TAG,"OtherAlert forced_wear localOnly=" + localOnly);
             Intent intent = new Intent(context, Home.class);
             NotificationCompat.Builder mBuilder =
-                    new NotificationCompat.Builder(context)
+                    new NotificationCompat.Builder(context, channelId)
+                            .setVisibility(Pref.getBooleanDefaultFalse("public_notifications") ? Notification.VISIBILITY_PUBLIC : Notification.VISIBILITY_PRIVATE)
                             .setSmallIcon(R.drawable.ic_action_communication_invert_colors_on)
                             .setContentTitle(message)
                             .setContentText(message)
+                            .setLocalOnly(localOnly)
                             .setContentIntent(PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT));
             if (addDeleteIntent) {
                 Intent deleteIntent = new Intent(context, SnoozeOnNotificationDismissService.class);
                 deleteIntent.putExtra("alertType", type);
+                deleteIntent.putExtra("raisedTimeStamp", JoH.tsl());
                 mBuilder.setDeleteIntent(PendingIntent.getService(context, 0, deleteIntent, PendingIntent.FLAG_UPDATE_CURRENT));
             }
             mBuilder.setVibrate(vibratePattern);
@@ -861,10 +950,10 @@ public class Notifications extends IntentService {
                 }
             }
             NotificationManager mNotifyMgr = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-            mNotifyMgr.cancel(notificatioId);
+            //mNotifyMgr.cancel(notificatioId);
             //Log.d(TAG, "Notify");
             Log.ueh("Other Alert",message);
-            mNotifyMgr.notify(notificatioId, mBuilder.build());
+            mNotifyMgr.notify(notificatioId, XdripNotificationCompat.build(mBuilder));
         }
     }
 

@@ -1,5 +1,6 @@
 package com.eveningoutpost.dexdrip.Models;
 
+import android.os.AsyncTask;
 import android.provider.BaseColumns;
 
 //KS import com.eveningoutpost.dexdrip.GcmActivity;
@@ -10,6 +11,9 @@ import com.activeandroid.Model;
 import com.activeandroid.annotation.Column;
 import com.activeandroid.annotation.Table;
 import com.activeandroid.query.Select;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
+import com.eveningoutpost.dexdrip.utils.CheckBridgeBattery;
+import com.eveningoutpost.dexdrip.utils.DexCollectionType;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.Expose;
@@ -22,7 +26,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Created by stephenblack on 11/6/14.
+ * Created by Emma Black on 11/6/14.
  */
 
 @Table(name = "TransmitterData", id = BaseColumns._ID)
@@ -81,16 +85,28 @@ public class TransmitterData extends Model {
 
             if (data.length > 1) { 
                 transmitterData.sensor_battery_level = Integer.parseInt(data[1]);
-                /* //KS
                 if (data.length > 2) {
                     try {
-                        Home.setPreferencesInt("bridge_battery", Integer.parseInt(data[2]));
-                        if (Home.get_master()) GcmActivity.sendBridgeBattery(Home.getPreferencesInt("bridge_battery",-1));
+                        Pref.setInt("bridge_battery", Integer.parseInt(data[2]));
+                        CheckBridgeBattery.checkBridgeBattery();
+                        //if (Home.get_master()) GcmActivity.sendBridgeBattery(Pref.getInt("bridge_battery",-1));
                     } catch (Exception e) {
                         Log.e(TAG, "Got exception processing classic wixel or limitter battery value: " + e.toString());
                     }
+                    if (data.length > 3) {
+                        if ((DexCollectionType.getDexCollectionType() == DexCollectionType.LimiTTer)
+                                && (!Pref.getBooleanDefaultFalse("use_transmiter_pl_bluetooth"))) {
+                            try {
+                                // reported sensor age in minutes
+                                final Integer sensorAge = Integer.parseInt(data[3]);
+                                if ((sensorAge > 0) && (sensorAge < 200000))
+                                    Pref.setInt("nfc_sensor_age", sensorAge);
+                            } catch (Exception e) {
+                                Log.e(TAG, "Got exception processing field 4 in classic limitter protocol: " + e);
+                            }
+                        }
+                    }
                 }
-                */
             }
             transmitterData.raw_data = Integer.parseInt(data[0]);
             transmitterData.filtered_data = Integer.parseInt(data[0]);
@@ -129,6 +145,12 @@ public class TransmitterData extends Model {
         transmitterData.timestamp = timestamp;
         transmitterData.uuid = UUID.randomUUID().toString();
         transmitterData.save();
+
+        int wearBatteryLevel = CheckBridgeBattery.getBatteryLevel(Home.getAppContext());
+        Log.i(TAG, "create wearBatteryLevel=" + wearBatteryLevel);
+        Pref.setInt("bridge_battery", wearBatteryLevel);//TODO confirm wear battery should be used as bridge
+        CheckBridgeBattery.checkBridgeBattery();
+
         return transmitterData;
     }
 
@@ -193,6 +215,17 @@ public class TransmitterData extends Model {
         return null;
     }
 
+    public static void cleanup(long timestamp) {
+        List<TransmitterData> transmitterData = new Select()
+                .from(TransmitterData.class)
+                .where("timestamp < ?", timestamp)
+                .orderBy("timestamp desc")
+                .execute();
+        if (transmitterData != null) Log.d(TAG, "cleanup TransmitterData size=" + transmitterData.size());
+        new Cleanup().execute(transmitterData);
+
+    }
+
     public static TransmitterData findByUuid(String uuid) {//KS
         try {
             return new Select()
@@ -213,6 +246,20 @@ public class TransmitterData extends Model {
                 .create();
 
         return gson.toJson(this);
+    }
+
+    private static class Cleanup extends AsyncTask<List<TransmitterData>, Integer, Boolean> {
+        @Override
+        protected Boolean doInBackground(List<TransmitterData>... errors) {
+            try {
+                for(TransmitterData transmitterData : errors[0]) {
+                    transmitterData.delete();
+                }
+                return true;
+            } catch(Exception e) {
+                return false;
+            }
+        }
     }
 
     /*

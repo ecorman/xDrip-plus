@@ -32,7 +32,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 
 /**
- * Created by stephenblack on 1/14/15.
+ * Created by Emma Black on 1/14/15.
  */
 @Table(name = "AlertType", id = BaseColumns._ID)
 public class AlertType extends Model {
@@ -329,7 +329,11 @@ public class AlertType extends Model {
 
         fixUpTable();
 
-        AlertType at = get_alert(uuid);
+        final AlertType at = get_alert(uuid);
+        if (at == null) {
+            Log.e(TAG, "Alert Type null during update");
+            return;
+        }
         at.name = name;
         at.above = above;
         at.threshold = threshold;
@@ -365,6 +369,15 @@ public class AlertType extends Model {
         return name + " " + above + " " + threshold + " "+ all_day + " " +time +" " + minutes_between + " uuid" + uuid;
     }
 
+    public String toS() {
+        Gson gson = new GsonBuilder()
+                .excludeFieldsWithoutExposeAnnotation()
+                .registerTypeAdapter(Date.class, new DateTypeAdapter())
+                .serializeSpecialFloatingPointValues()
+                .create();
+        return gson.toJson(this);
+    }
+
     public static void print_all() {
         List<AlertType> Alerts  = new Select()
             .from(AlertType.class)
@@ -374,6 +387,15 @@ public class AlertType extends Model {
         for (AlertType alert : Alerts) {
             Log.d(TAG, alert.toString());
         }
+    }
+
+    public static List<AlertType> getAllActive() {
+        List<AlertType> alerts  = new Select()
+                .from(AlertType.class)
+                .where("active = ?", true)
+                .execute();
+
+        return alerts;
     }
 
     public static List<AlertType> getAll(boolean above) {
@@ -540,7 +562,7 @@ public class AlertType extends Model {
             at.override_silent_mode = override_silent_mode;
             at.default_snooze = snooze;
             at.vibrate = vibrate;
-            AlertPlayer.getPlayer().startAlert(context, false, at, "TEST");
+            AlertPlayer.getPlayer().startAlert(context, false, at, "TEST", false);
     }
 
     // Time is calculated in minutes. that is 01:20 means 80 minutes.
@@ -580,7 +602,7 @@ public class AlertType extends Model {
                 .create();
         String output =  gson.toJson(alerts);
         Log.e(TAG, "Created the string " + output);
-        prefs.edit().putString("saved_alerts", output).commit();
+        prefs.edit().putString("saved_alerts", output).commit(); // always leave this as commit
 
         return true;
 

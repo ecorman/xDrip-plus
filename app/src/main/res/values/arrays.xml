@@ -7,10 +7,12 @@
         <item>Wifi Wixel + BT Wixel</item>
         <item>Wifi Wixel + xBridge Wixel</item>
         <item>G4 Share Receiver</item>
-        <item>G5 Transmitter (test)</item>
-        <item>LimiTTer</item>
+        <item>G5 Transmitter</item>
+        <item>Libre Bluetooth</item>
         <item>xDrip+ Sync Follower</item>
         <item>LibreAlarm</item>
+        <item>640G / EverSense</item>
+        <item>Disable Collection</item>
     </string-array>
 
     <string-array name="DexCollectionMethodValues">
@@ -24,7 +26,8 @@
         <item>LimiTTer</item>
         <item>Follower</item>
         <item>LibreAlarm</item>
-
+        <item>NSEmulator</item>
+        <item>Disabled</item>
     </string-array>
 
     <string-array name="SendToPebbleChoice">
@@ -83,12 +86,14 @@
     </string-array>
 
     <string-array name="TreatmentCalibrationChoice">
+        <item>auto</item>
         <item>ask</item>
         <item>never</item>
         <item>always</item>
     </string-array>
 
     <string-array name="TreatmentCalibrationChoiceDetail">
+        <item>Automatic mode (best)</item>
         <item>Ask me every time</item>
         <item>Never use them</item>
         <item>Always use them</item>
@@ -96,8 +101,8 @@
 
 
     <string-array name="bgUnitEntries">
-        <item>mgdl</item>
-        <item>mmol</item>
+        <item>mg/dL</item>
+        <item>mmol/L</item>
     </string-array>
 
     <string-array name="bgUnitValues">
@@ -137,4 +142,26 @@
         <item>Custom Sound/Alarm</item>
         <item>Default xDrip sound</item>
     </string-array>
+
+    <string-array name="reminderAlertType">
+        <item>Android Ringtone/Alarm</item>
+        <item>Custom Audio file</item>
+        <item>Default xDrip+ reminder sound</item>
+    </string-array>
+
+<!--    TODO abstract noise values to single source -->
+    <string-array name="NoiseLevelBlock">
+        <item>Send even Extremely noisy signals</item>
+        <item>Only block noise level Extreme</item>
+        <item>Block Very High noise and worse</item>
+        <item>Block High noise and worse</item>
+    </string-array>
+    <string-array name="NoiseLevelBlockValues">
+        <item>100000</item>
+        <item>200</item>
+        <item>60</item>
+        <item>10</item>
+    </string-array>
+
+
 </resources>

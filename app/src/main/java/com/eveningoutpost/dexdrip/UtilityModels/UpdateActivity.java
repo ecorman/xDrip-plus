@@ -3,6 +3,7 @@ package com.eveningoutpost.dexdrip.UtilityModels;
 // jamorham
 
 import android.Manifest;
+import android.app.DownloadManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -117,7 +118,7 @@ public class UpdateActivity extends AppCompatActivity {
                         }
 
 
-                        Request request = new Request.Builder()
+                        final Request request = new Request.Builder()
                                 // Mozilla header facilitates compression
                                 .header("User-Agent", "Mozilla/5.0")
                                 .header("Connection", "close")
@@ -331,9 +332,13 @@ public class UpdateActivity extends AppCompatActivity {
                     filename = matcher.group(1);
                 } else {
                     filename = "";
+                        final Matcher matcher2 = Pattern.compile("/([^/]*?.apk)").matcher(URL);
+                        if (matcher2.find()) {
+                            filename = matcher2.group(1);
+                        }
                 }
                 if (filename.length() < 5) {
-                    filename = "xDrip-plus-" + Integer.toString(newversion);
+                    filename = "xDrip-plus-" + Integer.toString(newversion) + ".apk";
                 }
 
                 Log.d(TAG, "Filename: " + filename);
@@ -432,6 +437,13 @@ public class UpdateActivity extends AppCompatActivity {
                 if ((filename != null) && (filename.length() > 5) && (dest_file != null)) {
                     if ((CHECKSUM.length() == 0) || (lastDigest.length() == 0) || (CHECKSUM.equals(lastDigest))) {
                         try {
+                            try {
+                                DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                                dm.addCompletedDownload(filename, "xDrip+ update version " + newversion, false, "application/vnd.android.package-archive", getDownloadFolder() + "/" + filename, FILE_SIZE, true);
+                            } catch (Exception e) {
+                                Log.e(TAG, "Download manager error: " + e);
+                            }
+
                             final Intent installapk = new Intent(Intent.ACTION_VIEW);
                             installapk.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                             installapk.setDataAndType(Uri.fromFile(dest_file), "application/vnd.android.package-archive");

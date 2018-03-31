@@ -18,11 +18,11 @@ import com.eveningoutpost.dexdrip.UtilityModels.UndoRedo;
 import com.eveningoutpost.dexdrip.UtilityModels.CalibrationSendQueue;
 import com.eveningoutpost.dexdrip.utils.ActivityWithMenu;
 import com.eveningoutpost.dexdrip.wearintegration.WatchUpdaterService;
+import static com.eveningoutpost.dexdrip.Home.startWatchUpdaterService;
 
 
 public class CalibrationOverride extends ActivityWithMenu {
-        Button button;
-    public static final String menu_name = "Override Calibration";
+    Button button;
     private static final String TAG = "OverrideCalib";
 
     @Override
@@ -39,7 +39,7 @@ public class CalibrationOverride extends ActivityWithMenu {
 
     @Override
     public String getMenuName() {
-        return menu_name;
+        return getString(R.string.override_calibration);
     }
 
     public void addListenerOnButton() {
@@ -54,23 +54,23 @@ public class CalibrationOverride extends ActivityWithMenu {
                         try {
                             final double calValue = JoH.tolerantParseDouble(string_value);
 
-                            Calibration last_calibration = Calibration.lastValid();
-                            last_calibration.sensor_confidence = 0;
-                            last_calibration.slope_confidence = 0;
-                            last_calibration.save();
-                            CalibrationSendQueue.addToQueue(last_calibration, getApplicationContext());
-                            // TODO we need to push the nixing of this last calibration
+                            final Calibration last_calibration = Calibration.lastValid();
+                            if (last_calibration == null) {
+                                Log.wtf(TAG, "Last valid calibration is null when trying to cancel it in override!");
+                            } else {
+                                last_calibration.sensor_confidence = 0;
+                                last_calibration.slope_confidence = 0;
+                                last_calibration.save();
+                                CalibrationSendQueue.addToQueue(last_calibration, getApplicationContext());
+                                // TODO we need to push the nixing of this last calibration
+                            }
 
                             final Calibration calibration = Calibration.create(calValue, getApplicationContext());
                             if (calibration != null) {
                                 UndoRedo.addUndoCalibration(calibration.uuid);
                                 GcmActivity.pushCalibration(string_value, "0");
 
-                                final boolean wear_integration = Home.getPreferencesBoolean("wear_sync", false);//KS
-                                if (wear_integration) {
-                                    android.util.Log.d("CalibrationOverride", "start WatchUpdaterService with ACTION_SYNC_CALIBRATION");
-                                    startService(new Intent(v.getContext(), WatchUpdaterService.class).setAction(WatchUpdaterService.ACTION_SYNC_CALIBRATION));
-                                }
+                                //startWatchUpdaterService(v.getContext(), WatchUpdaterService.ACTION_SYNC_CALIBRATION, TAG);
 
                             } else {
                                 Log.e(TAG, "Calibration creation resulted in null");

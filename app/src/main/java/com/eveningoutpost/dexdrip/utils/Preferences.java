@@ -1,5 +1,6 @@
 package com.eveningoutpost.dexdrip.utils;
 
+import android.annotation.SuppressLint;
 import android.app.AlertDialog;
 import android.appwidget.AppWidgetManager;
 import android.content.ComponentName;
@@ -30,23 +31,26 @@ import android.text.TextUtils;
 import android.widget.BaseAdapter;
 import android.widget.Toast;
 
-import com.eveningoutpost.dexdrip.BestGlucose;
 import com.eveningoutpost.dexdrip.GcmActivity;
 import com.eveningoutpost.dexdrip.Home;
-import com.eveningoutpost.dexdrip.Models.BgReading;
 import com.eveningoutpost.dexdrip.Models.JoH;
 import com.eveningoutpost.dexdrip.Models.Profile;
 import com.eveningoutpost.dexdrip.Models.UserError.ExtraLogTags;
 import com.eveningoutpost.dexdrip.Models.UserError.Log;
+import com.eveningoutpost.dexdrip.Models.UserNotification;
 import com.eveningoutpost.dexdrip.NFCReaderX;
 import com.eveningoutpost.dexdrip.ParakeetHelper;
 import com.eveningoutpost.dexdrip.R;
 import com.eveningoutpost.dexdrip.Services.ActivityRecognizedService;
 import com.eveningoutpost.dexdrip.Services.BluetoothGlucoseMeter;
+import com.eveningoutpost.dexdrip.Services.G5BaseService;
 import com.eveningoutpost.dexdrip.Services.PlusSyncService;
 import com.eveningoutpost.dexdrip.UtilityModels.CollectionServiceStarter;
 import com.eveningoutpost.dexdrip.UtilityModels.Constants;
+import com.eveningoutpost.dexdrip.UtilityModels.Experience;
+import com.eveningoutpost.dexdrip.UtilityModels.Pref;
 import com.eveningoutpost.dexdrip.UtilityModels.ShotStateStore;
+import com.eveningoutpost.dexdrip.UtilityModels.SpeechUtil;
 import com.eveningoutpost.dexdrip.UtilityModels.UpdateActivity;
 import com.eveningoutpost.dexdrip.UtilityModels.pebble.PebbleUtil;
 import com.eveningoutpost.dexdrip.UtilityModels.pebble.PebbleWatchSync;
@@ -58,6 +62,8 @@ import com.eveningoutpost.dexdrip.UtilityModels.pebble.watchface.InstallPebbleWa
 import com.eveningoutpost.dexdrip.WidgetUpdateService;
 import com.eveningoutpost.dexdrip.calibrations.PluggableCalibration;
 import com.eveningoutpost.dexdrip.profileeditor.ProfileEditor;
+import com.eveningoutpost.dexdrip.wearintegration.WatchUpdaterService;
+import com.eveningoutpost.dexdrip.webservices.XdripWebService;
 import com.eveningoutpost.dexdrip.xDripWidget;
 import com.eveningoutpost.dexdrip.xdrip;
 import com.google.zxing.integration.android.IntentIntegrator;
@@ -96,9 +102,11 @@ public class Preferences extends PreferenceActivity {
     private static Preference force_english;
     private static Preference nfc_expiry_days;
 
+    private static AllPrefsFragment pFragment;
 
     private void refreshFragments() {
         this.preferenceFragment = new AllPrefsFragment();
+        pFragment = this.preferenceFragment;
         getFragmentManager().beginTransaction().replace(android.R.id.content,
                 this.preferenceFragment).commit();
     }
@@ -162,7 +170,7 @@ public class Preferences extends PreferenceActivity {
                     return;
                 }
 
-                SharedPreferences.Editor editor = prefs.edit();
+                final SharedPreferences.Editor editor = prefs.edit();
                 int changes = 0;
                 for (Map.Entry<String, String> entry : prefsmap.entrySet()) {
                     String key = entry.getKey();
@@ -178,6 +186,7 @@ public class Preferences extends PreferenceActivity {
                 }
                 editor.apply();
                 refreshFragments();
+                ExtraLogTags.readPreference(Pref.getStringDefaultBlank("extra_tags_for_logging"));
                 Toast.makeText(getApplicationContext(), "Loaded " + Integer.toString(changes) + " preferences from QR code", Toast.LENGTH_LONG).show();
                 PlusSyncService.clearandRestartSyncService(getApplicationContext());
                 if (prefs.getString("dex_collection_method", "").equals("Follower")) {
@@ -217,9 +226,10 @@ public class Preferences extends PreferenceActivity {
             String scanresults = scanResult.getContents();
             if (scanresults.startsWith(DisplayQRCode.qrmarker)) {
                 installxDripPlusPreferencesFromQRCode(prefs, scanresults);
+                return;
             }
 
-            NSBarcodeConfig barcode = new NSBarcodeConfig(scanresults);
+            final NSBarcodeConfig barcode = new NSBarcodeConfig(scanresults);
             if (barcode.hasMongoConfig()) {
                 if (barcode.getMongoUri().isPresent()) {
                     SharedPreferences.Editor editor = prefs.edit();
@@ -286,16 +296,15 @@ public class Preferences extends PreferenceActivity {
             Log.e(TAG, "Failed to set theme");
         }
         super.onCreate(savedInstanceState);
-        this.preferenceFragment = new AllPrefsFragment();
-        getFragmentManager().beginTransaction().replace(android.R.id.content,
-                this.preferenceFragment).commit();
+
+        refreshFragments();
         processExtraData();
     }
 
     @Override
     protected void onResume()
     {
-        super.onResume();;
+        super.onResume();
         PreferenceManager.getDefaultSharedPreferences(this).registerOnSharedPreferenceChangeListener(ActivityRecognizedService.prefListener);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && DexCollectionType.hasBluetooth()) {
             LocationHelper.requestLocationForBluetooth(this); // double check!
@@ -307,6 +316,7 @@ public class Preferences extends PreferenceActivity {
     {
         super.onPause();
         PreferenceManager.getDefaultSharedPreferences(this).unregisterOnSharedPreferenceChangeListener(ActivityRecognizedService.prefListener);
+        pFragment = null;
     }
 
     @Override
@@ -366,6 +376,10 @@ public class Preferences extends PreferenceActivity {
     private static void refreshProfileRatios() {
         profile_carb_ratio_default.setTitle(format_carb_ratio(profile_carb_ratio_default.getTitle().toString(), ProfileEditor.minMaxCarbs(ProfileEditor.loadData(false))));
         profile_insulin_sensitivity_default.setTitle(format_insulin_sensitivity(profile_insulin_sensitivity_default.getTitle().toString(), ProfileEditor.minMaxSens(ProfileEditor.loadData(false))));
+    }
+
+    private static void restartPebble() {
+        xdrip.getAppContext().startService(new Intent(xdrip.getAppContext(), PebbleWatchSync.class));
     }
 
     private static Preference.OnPreferenceChangeListener sBindPreferenceSummaryToValueListener = new Preference.OnPreferenceChangeListener() {
@@ -516,7 +530,7 @@ public class Preferences extends PreferenceActivity {
         SharedPreferences prefs;
 
         private void setSummary(String pref_name) {
-            try {
+     /*       try {
                 // is there a cleaner way to bind these values when setting programatically?
                 final String pref_val = this.prefs.getString(pref_name, "");
                 findPreference(pref_name).setSummary(pref_val);
@@ -525,8 +539,25 @@ public class Preferences extends PreferenceActivity {
             } catch (Exception e) {
                 Log.e(TAG, "Exception during setSummary: " + e.toString());
             }
+            */
+            setSummary_static(this, pref_name);
         }
 
+        private static void setSummary_static(AllPrefsFragment allPrefsFragment, String pref_name) {
+            try {
+                // is there a cleaner way to bind these values when setting programatically?
+                final String pref_val = allPrefsFragment.prefs.getString(pref_name, "");
+                allPrefsFragment.findPreference(pref_name).setSummary(pref_val);
+                EditTextPreference thispref = (EditTextPreference) allPrefsFragment.findPreference(pref_name);
+                thispref.setText(pref_val);
+            } catch (Exception e) {
+                Log.e(TAG, "Exception during setSummary: " + e.toString());
+            }
+        }
+
+
+
+        @SuppressLint("ApplySharedPref")
         @Override
         public void onCreate(Bundle savedInstanceState) {
             super.onCreate(savedInstanceState);
@@ -548,6 +579,7 @@ public class Preferences extends PreferenceActivity {
             bindPreferenceSummaryToValue(findPreference("falling_bg_val"));
             bindPreferenceSummaryToValue(findPreference("rising_bg_val"));
             bindPreferenceSummaryToValue(findPreference("other_alerts_sound"));
+            bindPreferenceSummaryToValue(findPreference("bridge_battery_alert_level"));
 
             addPreferencesFromResource(R.xml.pref_data_source);
 
@@ -607,6 +639,33 @@ public class Preferences extends PreferenceActivity {
                     return true;
                 }
 
+            });
+
+            // this gets cached in a static final field at the moment so needs hard reset
+            findPreference("g5-battery-warning-level").setOnPreferenceChangeListener((preference, newValue) -> {
+                prefs.edit().putString("g5-battery-warning-level", (String) newValue).commit();
+                G5BaseService.resetTransmitterBatteryStatus();
+                SdcardImportExport.hardReset();
+                return true;
+            });
+
+            findPreference("use_ob1_g5_collector_service").setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                Thread.sleep(1000);
+                            } catch (InterruptedException e) {
+                                //
+                            }
+                            CollectionServiceStarter.restartCollectionService(xdrip.getAppContext());
+                        }
+                    }).start();
+
+                    return true;
+                }
             });
 
             final Preference profile_carb_absorption_default = findPreference("profile_carb_absorption_default");
@@ -708,6 +767,7 @@ public class Preferences extends PreferenceActivity {
             final Preference pebbleDeltaUnits = findPreference("pebble_show_delta_units");
             final Preference pebbleShowArrows = findPreference("pebble_show_arrows");
             final Preference pebbleVibrateNoSignal = findPreference("pebble_vibrate_no_signal");
+            final Preference pebbleVibrateNoBluetooth = findPreference("pebble_vibrate_no_bluetooth");
             final Preference pebbleTinyDots = findPreference("pebble_tiny_dots");
             final EditTextPreference pebbleSpecialValue = (EditTextPreference) findPreference("pebble_special_value");
             bindPreferenceSummaryToValueAndEnsureNumeric(pebbleSpecialValue);
@@ -715,8 +775,9 @@ public class Preferences extends PreferenceActivity {
             bindPreferenceSummaryToValue(pebbleSpecialText);
             // Pebble Trend - END
 
-            final Preference node_wearG5 = findPreference("node_wearG5");//KS
             bindPreferenceSummaryToValue(findPreference("node_wearG5"));//KS
+            bindPreferenceSummaryToValue(findPreference("wear_logs_prefix"));
+            bindPreferenceSummaryToValue(findPreference("disable_wearG5_on_missedreadings_level"));
 
             final Preference useCustomSyncKey = findPreference("use_custom_sync_key");
             final Preference CustomSyncKey = findPreference("custom_sync_key");
@@ -732,9 +793,25 @@ public class Preferences extends PreferenceActivity {
             final Preference disableAlertsStaleDataMinutes = findPreference("disable_alerts_stale_data_minutes");
             final PreferenceScreen calibrationSettingsScreen = (PreferenceScreen) findPreference("xdrip_plus_calibration_settings");
             final PreferenceScreen colorScreen = (PreferenceScreen) findPreference("xdrip_plus_color_settings");
-            final Preference adrian_calibration_mode = findPreference("adrian_calibration_mode");
+            final Preference old_school_calibration_mode = findPreference("old_school_calibration_mode");
             final Preference extraTagsForLogs = findPreference("extra_tags_for_logging");
             final Preference enableBF = findPreference("enable_bugfender");
+            final PreferenceCategory displayCategory = (PreferenceCategory) findPreference("xdrip_plus_display_category");
+
+
+            // TODO build list of preferences to cause wear refresh from list
+            findPreference("wear_sync").setOnPreferenceChangeListener((preference, newValue) -> {
+                        WatchUpdaterService.startSelf();
+                        return true;
+                    }
+            );
+
+            // TODO build list of preferences to cause wear refresh from list
+            findPreference("use_wear_heartrate").setOnPreferenceChangeListener((preference, newValue) -> {
+                        WatchUpdaterService.startSelf();
+                        return true;
+                    }
+            );
 
             findPreference("bluetooth_meter_enabled").setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
@@ -754,6 +831,11 @@ public class Preferences extends PreferenceActivity {
 
             findPreference("scan_and_pair_meter").setSummary(prefs.getString("selected_bluetooth_meter_info", ""));
 
+            findPreference("xdrip_webservice").setOnPreferenceChangeListener((preference, newValue) -> {
+                preference.getEditor().putBoolean(preference.getKey(), (boolean) newValue).apply(); // write early for method below
+                XdripWebService.immortality(); // start or stop service when preference toggled
+                return true;
+            });
 
             if (enableBF != null ) enableBF.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                                                                               @Override
@@ -795,11 +877,16 @@ public class Preferences extends PreferenceActivity {
                 }
             });
 
+
+
+
             units_pref.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
 
-                    try {
+                    handleUnitsChange(preference, newValue, pFragment);
+                   /* try {
                         final Double highVal = Double.parseDouble(AllPrefsFragment.this.prefs.getString("highValue", "0"));
                         final Double lowVal = Double.parseDouble(AllPrefsFragment.this.prefs.getString("lowValue", "0"));
                         final Double default_insulin_sensitivity = Double.parseDouble(AllPrefsFragment.this.prefs.getString("profile_insulin_sensitivity_default", "54"));
@@ -851,7 +938,7 @@ public class Preferences extends PreferenceActivity {
 
                     } catch (Exception e) {
                         Log.e(TAG, "Got excepting processing high/low value preferences: " + e.toString());
-                    }
+                    }*/
                     return true;
                 }
             });
@@ -953,6 +1040,15 @@ public class Preferences extends PreferenceActivity {
 
             if (!engineering_mode) {
                 try {
+                    displayCategory.removePreference(findPreference("bg_compensate_noise_ultrasensitive"));
+                } catch (Exception e) {
+                    //
+                }
+            }
+
+
+            if (!engineering_mode) {
+                try {
                     ((PreferenceScreen) findPreference("dexcom_server_upload_screen")).removePreference(findPreference("share_test_key"));
                 } catch (Exception e) {
                     //
@@ -1021,26 +1117,45 @@ public class Preferences extends PreferenceActivity {
                     } catch (Exception e) { //
                     }
                 }
+                if (Build.VERSION.SDK_INT < 23) {
+                    try {
+                        ((PreferenceGroup)findPreference("xdrip_plus_display_category")).removePreference(findPreference("xdrip_plus_number_icon"));
+                    } catch (Exception e) { //
+                    }
+                }
 
+               // if (!Experience.gotData()) {
+               //     try {
+               //     collectionCategory.removePreference(runInForeground);
+               //     } catch (Exception e) { //
+               //     }
+               // }
+
+
+                final PreferenceScreen g5_settings_screen = (PreferenceScreen) findPreference("xdrip_plus_g5_extra_settings");
                 if (collectionType == DexCollectionType.DexcomG5) {
                     try {
                         collectionCategory.addPreference(transmitterId);
-                        collectionCategory.addPreference(g5nonraw);
-                        collectionCategory.addPreference(scanConstantly);
-                        collectionCategory.addPreference(reAuth);
-                        collectionCategory.addPreference(reBond);
-                        collectionCategory.addPreference(runOnMain);
+
+                        collectionCategory.addPreference(g5_settings_screen);
+                        //collectionCategory.addPreference(g5nonraw);
+                        //collectionCategory.addPreference(scanConstantly);
+                        //collectionCategory.addPreference(reAuth);
+                        //collectionCategory.addPreference(reBond);
+                        //collectionCategory.addPreference(runOnMain);
                     } catch (NullPointerException e) {
                         Log.wtf(TAG, "Null pointer adding G5 prefs ", e);
                     }
                 } else {
                     try {
                         // collectionCategory.removePreference(transmitterId);
-                        collectionCategory.removePreference(scanConstantly);
-                        collectionCategory.removePreference(g5nonraw);
-                        collectionCategory.removePreference(reAuth);
-                        collectionCategory.removePreference(reBond);
-                        collectionCategory.removePreference(runOnMain);
+
+                        collectionCategory.removePreference(g5_settings_screen);
+                       // collectionCategory.removePreference(scanConstantly);
+                       // collectionCategory.removePreference(g5nonraw);
+                       // collectionCategory.removePreference(reAuth);
+                       // collectionCategory.removePreference(reBond);
+                       // collectionCategory.removePreference(runOnMain);
                     } catch (NullPointerException e) {
                         Log.wtf(TAG, "Null pointer removing G5 prefs ", e);
                     }
@@ -1048,8 +1163,8 @@ public class Preferences extends PreferenceActivity {
 
                 if (!engineering_mode) {
                     try {
-                        //getPreferenceScreen().removePreference(motionScreen);
-                        calibrationSettingsScreen.removePreference(adrian_calibration_mode);
+                        if (!Experience.gotData()) getPreferenceScreen().removePreference(motionScreen);
+                        calibrationSettingsScreen.removePreference(old_school_calibration_mode);
                     } catch (NullPointerException e) {
                         Log.wtf(TAG, "Nullpointer with engineering mode s ", e);
                     }
@@ -1084,6 +1199,21 @@ public class Preferences extends PreferenceActivity {
                 }
             }
 
+            try {
+                findPreference("calibration_notifications").setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                    @Override
+                    public boolean onPreferenceChange(Preference preference, Object newValue) {
+                        // clear any pending alerts
+                        final UserNotification userNotification = UserNotification.lastCalibrationAlert();
+                        if (userNotification != null) {
+                            userNotification.delete();
+                        }
+                        return true;
+                    }
+                });
+            } catch (Exception e) {
+                //
+            }
 
             bindPreferenceSummaryToValue(collectionMethod);
             bindPreferenceSummaryToValue(shareKey);
@@ -1100,7 +1230,7 @@ public class Preferences extends PreferenceActivity {
 
             // Pebble Trend -- START
 
-            int currentPebbleSync = PebbleUtil.getCurrentPebbleSyncType(this.prefs);
+            int currentPebbleSync = PebbleUtil.getCurrentPebbleSyncType();
 
             if (currentPebbleSync == 1) {
                 watchCategory.removePreference(pebbleSpecialValue);
@@ -1147,7 +1277,7 @@ public class Preferences extends PreferenceActivity {
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
                     final Context context = preference.getContext();
 
-                    int oldPebbleType = PebbleUtil.getCurrentPebbleSyncType(AllPrefsFragment.this.prefs);
+                    int oldPebbleType = PebbleUtil.getCurrentPebbleSyncType();
                     int pebbleType = PebbleUtil.getCurrentPebbleSyncType(newValue);
 
                     // install watchface
@@ -1176,6 +1306,7 @@ public class Preferences extends PreferenceActivity {
                             watchCategory.removePreference(pebbleSpecialValue);
                             watchCategory.removePreference(pebbleSpecialText);
                             watchCategory.removePreference(pebbleVibrateNoSignal);
+                            watchCategory.removePreference(pebbleVibrateNoBluetooth);
                         }
 
                         // Add New one
@@ -1190,6 +1321,7 @@ public class Preferences extends PreferenceActivity {
                             watchCategory.addPreference(pebbleDeltaUnits);
                             watchCategory.addPreference(pebbleShowArrows);
                             watchCategory.addPreference(pebbleVibrateNoSignal);
+                            watchCategory.addPreference(pebbleVibrateNoBluetooth);
                         }
 
                         if (oldPebbleType != 1) {
@@ -1203,12 +1335,11 @@ public class Preferences extends PreferenceActivity {
                 }
             });
 
-
+            // TODO reduce code duplication more
             pebbleTrend.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();
                     return true;
                 }
             });
@@ -1216,8 +1347,7 @@ public class Preferences extends PreferenceActivity {
             pebbleFilteredLine.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();
                     return true;
                 }
             });
@@ -1226,8 +1356,7 @@ public class Preferences extends PreferenceActivity {
             pebbleHighLine.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();;
                     return true;
                 }
             });
@@ -1235,8 +1364,7 @@ public class Preferences extends PreferenceActivity {
             pebbleLowLine.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();
                     return true;
                 }
             });
@@ -1244,32 +1372,28 @@ public class Preferences extends PreferenceActivity {
             pebbleTrendPeriod.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();
                     return true;
                 }
             });
             pebbleDelta.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();
                     return true;
                 }
             });
             pebbleDeltaUnits.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();
                     return true;
                 }
             });
             pebbleShowArrows.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();
                     return true;
                 }
             });
@@ -1277,11 +1401,36 @@ public class Preferences extends PreferenceActivity {
             pebbleTinyDots.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                 @Override
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
-                    Context context = preference.getContext();
-                    context.startService(new Intent(context, PebbleWatchSync.class));
+                    restartPebble();
                     return true;
                 }
             });
+
+            pebbleVibrateNoBluetooth.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    restartPebble();
+                    return true;
+                }
+            });
+
+            // TODO this attaches to the wrong named instance of use_pebble_health - until restructured so that there is only one instance
+            findPreference("use_pebble_health").setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    restartPebble();
+                    return true;
+                }
+            });
+
+            findPreference("pebble_show_bwp").setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    restartPebble();
+                    return true;
+                }
+            });
+
             // Pebble Trend -- END
 
             bindWidgetUpdater();
@@ -1293,8 +1442,29 @@ public class Preferences extends PreferenceActivity {
                     return true;
                 }
             });
-            bindPreferenceSummaryToValue(transmitterId);
-            transmitterId.getEditText().setFilters(new InputFilter[]{new InputFilter.AllCaps()});
+
+            bindPreferenceSummaryToValue(transmitterId); // duplicated below but this sets initial value
+            transmitterId.getEditText().setFilters(new InputFilter[]{new InputFilter.AllCaps()}); // TODO filter O ?
+            transmitterId.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                Thread.sleep(1000);
+                            } catch (InterruptedException e) {
+                                //
+                            }
+                            Log.d(TAG, "Trying to restart collector due to tx id change");
+                            CollectionServiceStarter.restartCollectionService(xdrip.getAppContext());
+                        }
+                    }).start();
+                    sBindPreferenceSummaryToValueListener.onPreferenceChange(preference, newValue);
+
+                    return true;
+                }
+            });
 
             // when changing collection method
                     collectionMethod.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
@@ -1333,7 +1503,7 @@ public class Preferences extends PreferenceActivity {
                     }
 
 
-                    if (collectionType != DexCollectionType.BluetoothWixel
+                /*    if ((collectionType != DexCollectionType.BluetoothWixel
                             && collectionType != DexCollectionType.DexcomShare
                             && collectionType != DexCollectionType.WifiWixel
                             && collectionType != DexCollectionType.DexbridgeWixel
@@ -1342,11 +1512,11 @@ public class Preferences extends PreferenceActivity {
                             && collectionType != DexCollectionType.WifiBlueToothWixel
                             && collectionType != DexCollectionType.WifiDexBridgeWixel
                             && collectionType != DexCollectionType.LibreAlarm
-                            ) {
+                            ) || (!Experience.gotData())) {
                         collectionCategory.removePreference(runInForeground);
                     } else {
                         collectionCategory.addPreference(runInForeground);
-                    }
+                    }*/
 
                     // jamorham always show wifi receivers option if populated as we may switch modes dynamically
                     if (collectionType != DexCollectionType.WifiWixel
@@ -1424,6 +1594,8 @@ public class Preferences extends PreferenceActivity {
                 }
             });
         }
+
+
 
         // all this boiler plate for a dynamic interface seems excessive and boring, I would love to know a helper library to simplify this
         private void set_nfc_expiry_change_listeners() {
@@ -1664,30 +1836,16 @@ public class Preferences extends PreferenceActivity {
                 public boolean onPreferenceChange(Preference preference, Object newValue) {
                     if ((Boolean) newValue) {
                         prefs.edit().putBoolean("bg_to_speech", true).commit(); // early write before we exit method
-                        AlertDialog.Builder alertDialog = new AlertDialog.Builder(getActivity());
-                        alertDialog.setTitle("Install Text-To-Speech Data?");
-                        alertDialog.setMessage("Install Text-To-Speech Data?\n(After installation of languages you might have to press \"Restart Collector\" in System Status.)");
+                        final AlertDialog.Builder alertDialog = new AlertDialog.Builder(getActivity());
+                        alertDialog.setTitle(R.string.install_text_to_speech_data_question);
+                        alertDialog.setMessage(getString(R.string.install_text_to_speech_data_question) + "\n" + getString(R.string.after_installation_of_languages_you_might_have_to));
                         alertDialog.setCancelable(true);
-                        alertDialog.setPositiveButton(R.string.ok, new DialogInterface.OnClickListener() {
-                            @Override
-                            public void onClick(DialogInterface dialog, int which) {
-                                BgToSpeech.installTTSData(getActivity());
-                            }
-                        });
+                        alertDialog.setPositiveButton(R.string.ok, (dialog, which) -> SpeechUtil.installTTSData(getActivity()));
                         alertDialog.setNegativeButton(R.string.no, null);
-                        AlertDialog alert = alertDialog.create();
+                        final AlertDialog alert = alertDialog.create();
                         alert.show();
                         try {
-                            BgToSpeech.setupTTS(preference.getContext()); // try to initialize now
-                            BgReading bgReading = BgReading.last();
-                            if (bgReading != null) {
-                                final BestGlucose.DisplayGlucose dg = BestGlucose.getDisplayGlucose();
-                                if (dg != null) {
-                                    BgToSpeech.speak(dg.mgdl, dg.timestamp + 1200000);
-                                } else {
-                                    BgToSpeech.speak(bgReading.calculated_value, bgReading.timestamp + 1200000);
-                                }
-                            }
+                            BgToSpeech.testSpeech();
                         } catch (Exception e) {
                             Log.e(TAG, "Got exception with TTS: " + e);
                         }
@@ -1697,8 +1855,30 @@ public class Preferences extends PreferenceActivity {
                     return true;
                 }
             });
-        }
 
+            findPreference("speech_speed").setOnPreferenceChangeListener((preference, newValue) ->
+                    {
+                        prefs.edit().putInt("speech_speed", (Integer) newValue).commit();
+                        try {
+                            BgToSpeech.testSpeech();
+                        } catch (Exception e) {
+                            Log.e(TAG, "Got exception with TTS: " + e);
+                        }
+                        return true;
+                    }
+            );
+            findPreference("speech_pitch").setOnPreferenceChangeListener((preference, newValue) ->
+                    {
+                        prefs.edit().putInt("speech_pitch", (Integer) newValue).commit();
+                        try {
+                            BgToSpeech.testSpeech();
+                        } catch (Exception e) {
+                            Log.e(TAG, "Got exception with TTS: " + e);
+                        }
+                        return true;
+                    }
+            );
+        }
 
 
         // Will update the widget if any setting relevant to the widget gets changed.
@@ -1711,6 +1891,72 @@ public class Preferences extends PreferenceActivity {
                 }
                 return true;
             }
+        }
+    }
+
+    public static void handleUnitsChange(Preference preference, Object newValue, AllPrefsFragment allPrefsFragment) {
+        try {
+            SharedPreferences preferences;
+            if (preference!= null) {
+                preferences = preference.getSharedPreferences();
+            } else {
+                preferences = PreferenceManager.getDefaultSharedPreferences(xdrip.getAppContext());
+            }
+
+            final Double highVal = Double.parseDouble(preferences.getString("highValue", "0"));
+            final Double lowVal = Double.parseDouble(preferences.getString("lowValue", "0"));
+            final Double default_insulin_sensitivity = Double.parseDouble(preferences.getString("profile_insulin_sensitivity_default", "54"));
+            final Double default_target_glucose = Double.parseDouble(preferences.getString("plus_target_range", "100"));
+
+
+            static_units = newValue.toString();
+            if (newValue.toString().equals("mgdl")) {
+                if (highVal < 36) {
+                    ProfileEditor.convertData(Constants.MMOLL_TO_MGDL);
+                    preferences.edit().putString("highValue", Long.toString(Math.round(highVal * Constants.MMOLL_TO_MGDL))).apply();
+                    preferences.edit().putString("profile_insulin_sensitivity_default", Long.toString(Math.round(default_insulin_sensitivity * Constants.MMOLL_TO_MGDL))).apply();
+                    preferences.edit().putString("plus_target_range", Long.toString(Math.round(default_target_glucose * Constants.MMOLL_TO_MGDL))).apply();
+                    Profile.invalidateProfile();
+                }
+                if (lowVal < 36) {
+                    ProfileEditor.convertData(Constants.MMOLL_TO_MGDL);
+                    preferences.edit().putString("lowValue", Long.toString(Math.round(lowVal * Constants.MMOLL_TO_MGDL))).apply();
+                    preferences.edit().putString("profile_insulin_sensitivity_default", Long.toString(Math.round(default_insulin_sensitivity * Constants.MMOLL_TO_MGDL))).apply();
+                    preferences.edit().putString("plus_target_range", Long.toString(Math.round(default_target_glucose * Constants.MMOLL_TO_MGDL))).apply();
+                    Profile.invalidateProfile();
+                }
+
+            } else {
+                if (highVal > 35) {
+                    ProfileEditor.convertData(Constants.MGDL_TO_MMOLL);
+                    preferences.edit().putString("highValue", JoH.qs(highVal * Constants.MGDL_TO_MMOLL, 1)).apply();
+                    preferences.edit().putString("profile_insulin_sensitivity_default", JoH.qs(default_insulin_sensitivity * Constants.MGDL_TO_MMOLL, 2)).apply();
+                    preferences.edit().putString("plus_target_range", JoH.qs(default_target_glucose * Constants.MGDL_TO_MMOLL,1)).apply();
+                    Profile.invalidateProfile();
+                }
+                if (lowVal > 35) {
+                    ProfileEditor.convertData(Constants.MGDL_TO_MMOLL);
+                    preferences.edit().putString("lowValue", JoH.qs(lowVal * Constants.MGDL_TO_MMOLL, 1)).apply();
+                    preferences.edit().putString("profile_insulin_sensitivity_default", JoH.qs(default_insulin_sensitivity * Constants.MGDL_TO_MMOLL, 2)).apply();
+                    preferences.edit().putString("plus_target_range", JoH.qs(default_target_glucose * Constants.MGDL_TO_MMOLL,1)).apply();
+                    Profile.invalidateProfile();
+                }
+            }
+            if (preference != null) preference.setSummary(newValue.toString());
+            if (allPrefsFragment != null) {
+                allPrefsFragment.setSummary("highValue");
+                allPrefsFragment.setSummary("lowValue");
+            }
+            if (profile_insulin_sensitivity_default != null) {
+                Log.d(TAG, "refreshing profile insulin sensitivity default display");
+                profile_insulin_sensitivity_default.setTitle(format_insulin_sensitivity(profile_insulin_sensitivity_default.getTitle().toString(), ProfileEditor.minMaxSens(ProfileEditor.loadData(false))));
+
+//                            do_format_insulin_sensitivity(profile_insulin_sensitivity_default, AllPrefsFragment.this.prefs, false, null);
+            }
+            Profile.reloadPreferences(preferences);
+
+        } catch (Exception e) {
+            Log.e(TAG, "Got excepting processing high/low value preferences: " + e.toString());
         }
     }
 

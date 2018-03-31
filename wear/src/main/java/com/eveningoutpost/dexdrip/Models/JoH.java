@@ -4,23 +4,26 @@ import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.AlarmManager;
+import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothManager;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
+//KS import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
+//KS import android.graphics.Canvas;
+//KS import android.graphics.Color;
+//KS import android.graphics.Paint;
 import android.graphics.Point;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
@@ -31,11 +34,16 @@ import android.net.Uri;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.PowerManager;
+import android.os.Vibrator;
 import android.provider.Settings;
-import android.support.v4.app.NotificationCompat;
-import android.support.v7.app.AppCompatActivity;
+//KS import android.support.v7.app.AlertDialog;
+//KS import android.support.v4.app.NotificationCompat;
+//KS import android.support.v7.app.AppCompatActivity;
+//KS import android.support.v7.view.ContextThemeWrapper;
 import android.text.InputType;
 import android.text.method.DigitsKeyListener;
 import android.util.Base64;
@@ -47,9 +55,13 @@ import android.widget.Toast;
 
 import com.eveningoutpost.dexdrip.Home;
 import com.eveningoutpost.dexdrip.R;
+import com.eveningoutpost.dexdrip.UtilityModels.Constants;
 import com.eveningoutpost.dexdrip.UtilityModels.PersistentStore;
 import com.eveningoutpost.dexdrip.utils.BestGZIPOutputStream;
+//KS import com.eveningoutpost.dexdrip.utils.CipherUtils;
 import com.eveningoutpost.dexdrip.xdrip;
+import com.google.common.primitives.Bytes;
+import com.google.common.primitives.UnsignedInts;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 
@@ -59,20 +71,28 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.Charset;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
 import java.util.zip.Deflater;
 import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 import java.util.zip.Inflater;
 
+import static android.bluetooth.BluetoothDevice.PAIRING_VARIANT_PIN;
+import static android.content.Context.ALARM_SERVICE;
+import static android.content.Context.VIBRATOR_SERVICE;
 //KS import static com.eveningoutpost.dexdrip.stats.StatsActivity.SHOW_STATISTICS_PRINT_COLOR;
 
 /**
@@ -81,13 +101,15 @@ import java.util.zip.Inflater;
  * lazy helper class for utilities
  */
 public class JoH {
-    final protected static char[] hexArray = "0123456789ABCDEF".toCharArray();
+    private final static char[] hexArray = "0123456789ABCDEF".toCharArray();
     private final static String TAG = "jamorham JoH";
     private final static boolean debug_wakelocks = false;
 
     private static double benchmark_time = 0;
     private static Map<String, Double> benchmarks = new HashMap<String, Double>();
     private static final Map<String, Long> rateLimits = new HashMap<String, Long>();
+
+    public static boolean buggy_samsung = false; // flag set when we detect samsung devices which do not perform to android specifications
 
     // qs = quick string conversion of double for printing
     public static String qs(double x) {
@@ -128,6 +150,10 @@ public class JoH {
         return (tsl() - when);
     }
 
+    public static long msTill(long when) {
+        return (when - tsl());
+    }
+
     public static long absMsSince(long when) {
         return Math.abs(tsl() - when);
     }
@@ -158,7 +184,6 @@ public class JoH {
             return null;
         }
     }
-
 
 
     public static String compressString(String source) {
@@ -193,10 +218,29 @@ public class JoH {
         }
     }
 
+    public static byte[] compressBytesforPayload(byte[] bytes) {
+        return compressBytesToBytes(Bytes.concat(bytes, bchecksum(bytes)));
+    }
+
     public static byte[] compressBytesToBytes(byte[] bytes) {
         try {
             ByteArrayOutputStream output = new ByteArrayOutputStream(bytes.length);
             BestGZIPOutputStream gzipped_data = new BestGZIPOutputStream(output);
+            gzipped_data.write(bytes);
+            gzipped_data.close();
+            byte[] compressed = output.toByteArray();
+            output.close();
+            return compressed;
+        } catch (Exception e) {
+            Log.e(TAG, "Exception in compress: " + e.toString());
+            return new byte[0];
+        }
+    }
+
+    public static byte[] compressBytesToBytesGzip(byte[] bytes) {
+        try {
+            ByteArrayOutputStream output = new ByteArrayOutputStream(bytes.length);
+            GZIPOutputStream gzipped_data = new GZIPOutputStream(output);
             gzipped_data.write(bytes);
             gzipped_data.close();
             byte[] compressed = output.toByteArray();
@@ -260,14 +304,54 @@ public class JoH {
     public static String base64decode(String input) {
         try {
             return new String(Base64.decode(input.getBytes("UTF-8"), Base64.NO_WRAP), "UTF-8");
-        } catch (UnsupportedEncodingException e) {
+        } catch (UnsupportedEncodingException | IllegalArgumentException e) {
             Log.e(TAG, "Got unsupported encoding: " + e);
             return "decode-error";
         }
     }
 
+
+    public static String base64encodeBytes(byte[] input) {
+        try {
+            return new String(Base64.encode(input, Base64.NO_WRAP), "UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            Log.e(TAG, "Got unsupported encoding: " + e);
+            return "encode-error";
+        }
+    }
+
+    public static byte[] base64decodeBytes(String input) {
+        try {
+            return Base64.decode(input.getBytes("UTF-8"), Base64.NO_WRAP);
+        } catch (UnsupportedEncodingException | IllegalArgumentException e) {
+            Log.e(TAG, "Got unsupported encoding: " + e);
+            return new byte[0];
+        }
+    }
+
     public static String ucFirst(String input) {
         return input.substring(0, 1).toUpperCase() + input.substring(1).toLowerCase();
+    }
+
+    public static boolean isSamsung() {
+        return Build.MANUFACTURER.toLowerCase().contains("samsung");
+    }
+
+    private static final String BUGGY_SAMSUNG_ENABLED = "buggy-samsung-enabled";
+    public static void persistentBuggySamsungCheck() {
+        if (!buggy_samsung) {
+            if (JoH.isSamsung() && PersistentStore.getLong(BUGGY_SAMSUNG_ENABLED) > 4) {
+                buggy_samsung = true;
+                UserError.Log.d(TAG,"Enabling buggy samsung mode due to historical pattern");
+            }
+        }
+    }
+
+    public static void setBuggySamsungEnabled() {
+        if (!buggy_samsung) {
+            JoH.buggy_samsung = true;
+            PersistentStore.incrementLong(BUGGY_SAMSUNG_ENABLED);
+        }
     }
 
     public static class DecimalKeyListener extends DigitsKeyListener {
@@ -331,6 +415,25 @@ public class JoH {
         }
     }
 
+    /*KS// compare stored byte array hashes
+    public static synchronized boolean differentBytes(String name, byte[] bytes) {
+        final String id = "differentBytes-" + name;
+        final String last_hash = PersistentStore.getString(id);
+        final String this_hash = CipherUtils.getSHA256(bytes);
+        if (this_hash.equals(last_hash)) return false;
+        PersistentStore.setString(id, this_hash);
+        return true;
+    }*/
+
+    public static synchronized void clearRatelimit(final String name) {
+        if (PersistentStore.getLong(name) > 0) {
+            PersistentStore.setLong(name, 0);
+        }
+        if (rateLimits.containsKey(name)) {
+            rateLimits.remove(name);
+        }
+    }
+
     // return true if below rate limit (persistent version)
     public static synchronized boolean pratelimit(String name, int seconds) {
         // check if over limit
@@ -356,6 +459,17 @@ public class JoH {
         // check if over limit
         if ((rateLimits.containsKey(name)) && (JoH.tsl() - rateLimits.get(name) < (seconds * 1000))) {
             Log.d(TAG, name + " rate limited: " + seconds + " seconds");
+            return false;
+        }
+        // not over limit
+        rateLimits.put(name, JoH.tsl());
+        return true;
+    }
+
+    // return true if below rate limit
+    public static synchronized boolean quietratelimit(String name, int seconds) {
+        // check if over limit
+        if ((rateLimits.containsKey(name)) && (JoH.tsl() - rateLimits.get(name) < (seconds * 1000))) {
             return false;
         }
         // not over limit
@@ -447,9 +561,10 @@ public class JoH {
     }
 
     public static String hourMinuteString() {
-        Date date = new Date();
-        SimpleDateFormat sd = new SimpleDateFormat("HH:mm");
-        return sd.format(date);
+        // Date date = new Date();
+        // SimpleDateFormat sd = new SimpleDateFormat("HH:mm");
+        //  return sd.format(date);
+        return hourMinuteString(JoH.tsl());
     }
 
     public static String hourMinuteString(long timestamp) {
@@ -462,6 +577,53 @@ public class JoH {
 
     public static String dateText(long timestamp) {
         return android.text.format.DateFormat.format("yyyy-MM-dd", timestamp).toString();
+    }
+
+    public static String niceTimeSince(long t) {
+        return niceTimeScalar(msSince(t));
+    }
+
+    public static String niceTimeTill(long t) {
+        return niceTimeScalar(-msSince(t));
+    }
+
+    // temporary
+    public static String niceTimeScalar(long t) {
+        String unit = "second";
+        t = t / 1000;
+        if (t > 59) {
+            unit = "minute";
+            t = t / 60;
+            if (t > 59) {
+                unit = "hour";
+                t = t / 60;
+                if (t > 24) {
+                    unit = "day";
+                    t = t / 24;
+                    if (t > 28) {
+                        unit = "week";
+                        t = t / 7;
+                    }
+                }
+            }
+        }
+        if (t != 1) unit = unit + "s";
+        return qs((double) t, 0) + " " + unit;
+    }
+
+    public static String niceTimeScalarNatural(long t) {
+        if (t > 3000000) t = t + 10000; // round up by 10 seconds if nearly an hour
+        if ((t > Constants.DAY_IN_MS) && (t < Constants.WEEK_IN_MS * 2)) {
+            final SimpleDateFormat df = new SimpleDateFormat("EEEE", Locale.getDefault());
+            final String day = df.format(new Date(JoH.tsl() + t));
+            return ((t > Constants.WEEK_IN_MS) ? "next " : "") + day;
+        } else {
+            return niceTimeScalar(t);
+        }
+    }
+
+    public static String niceTimeScalarRedux(long t) {
+        return niceTimeScalar(t).replaceFirst("^1 ", "");
     }
 
     public static double tolerantParseDouble(String str) throws NumberFormatException {
@@ -485,10 +647,28 @@ public class JoH {
         return wl;
     }
 
+    public static PowerManager.WakeLock getWakeLock(final int type, final String name, int millis) {//KS
+        final PowerManager pm = (PowerManager) xdrip.getAppContext().getSystemService(Context.POWER_SERVICE);//KS
+        PowerManager.WakeLock wl = pm.newWakeLock(type, name);//PowerManager.SCREEN_BRIGHT_WAKE_LOCK
+        wl.acquire(millis);
+        if (debug_wakelocks) Log.d(TAG, "getWakeLock: " + name + " " + wl.toString());
+        return wl;
+    }
+
     public static void releaseWakeLock(PowerManager.WakeLock wl) {
         if (debug_wakelocks) Log.d(TAG, "releaseWakeLock: " + wl.toString());
+        if (wl == null) return;
         if (wl.isHeld()) wl.release();
     }
+
+    public static PowerManager.WakeLock fullWakeLock(final String name, long millis) {
+        final PowerManager pm = (PowerManager) xdrip.getAppContext().getSystemService(Context.POWER_SERVICE);
+        PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE, name);
+        wl.acquire(millis);
+        if (debug_wakelocks) Log.d(TAG, "fullWakeLock: " + name + " " + wl.toString());
+        return wl;
+    }
+
 
     public static boolean isLANConnected() {
         final ConnectivityManager cm =
@@ -540,7 +720,7 @@ public class JoH {
 
     public static String getWifiSSID() {
         try {
-            final WifiManager wifi_manager = (WifiManager) xdrip.getAppContext().getSystemService(Context.WIFI_SERVICE);
+            final WifiManager wifi_manager = (WifiManager) xdrip.getAppContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             if (wifi_manager.isWifiEnabled()) {
                 final WifiInfo wifiInfo = wifi_manager.getConnectionInfo();
                 if (wifiInfo != null) {
@@ -550,8 +730,9 @@ public class JoH {
                             || wifi_state == NetworkInfo.DetailedState.CAPTIVE_PORTAL_CHECK) {
                         String ssid = wifiInfo.getSSID();
                         if (ssid.equals("<unknown ssid>")) return null; // WifiSsid.NONE;
-                        if (ssid.charAt(0)=='"') ssid=ssid.substring(1);
-                        if (ssid.charAt(ssid.length()-1)=='"') ssid=ssid.substring(0,ssid.length()-1);
+                        if (ssid.charAt(0) == '"') ssid = ssid.substring(1);
+                        if (ssid.charAt(ssid.length() - 1) == '"')
+                            ssid = ssid.substring(0, ssid.length() - 1);
                         return ssid;
                     }
                 }
@@ -593,6 +774,11 @@ public class JoH {
         return mainHandler.postDelayed(theRunnable, delay);
     }
 
+    public static void removeUiThreadRunnable(Runnable theRunnable) {
+        final Handler mainHandler = new Handler(xdrip.getAppContext().getMainLooper());
+        mainHandler.removeCallbacks(theRunnable);
+    }
+
     public static void static_toast(final Context context, final String msg, final int length) {
         try {
             if (!runOnUiThread(new Runnable() {
@@ -628,17 +814,45 @@ public class JoH {
         static_toast(context, msg, Toast.LENGTH_LONG);
     }
 
+    /* KS public static void show_ok_dialog(final Activity activity, String title, String message, final Runnable runnable) {
+        try {
+            AlertDialog.Builder builder = new AlertDialog.Builder(new ContextThemeWrapper(activity, R.style.AppTheme));
+            builder.setTitle(title);
+            builder.setMessage(message);
+            builder.setPositiveButton("OK", new DialogInterface.OnClickListener() {
+                public void onClick(DialogInterface dialog, int which) {
+                    dialog.dismiss();
+                    if (runnable != null) {
+                        runOnUiThreadDelayed(runnable, 10);
+                    }
+                }
+            });
+
+            builder.create().show();
+        } catch (Exception e) {
+            Log.wtf(TAG, "show_dialog exception: " + e);
+            static_toast_long(message);
+        }
+    }*/
+
     public static synchronized void playResourceAudio(int id) {
-        playSoundUri(ContentResolver.SCHEME_ANDROID_RESOURCE + "://" + xdrip.getAppContext().getPackageName() + "/" + id);
+        playSoundUri(getResourceURI(id));
     }
 
-    public static synchronized void playSoundUri(String soundUri) {
+    public static String getResourceURI(int id) {
+        return ContentResolver.SCHEME_ANDROID_RESOURCE + "://" + xdrip.getAppContext().getPackageName() + "/" + id;
+    }
+
+    public static synchronized MediaPlayer playSoundUri(String soundUri) {
         try {
             JoH.getWakeLock("joh-playsound", 10000);
             final MediaPlayer player = MediaPlayer.create(xdrip.getAppContext(), Uri.parse(soundUri));
+            player.setLooping(false);
             player.start();
+            return player;
         } catch (Exception e) {
             Log.wtf(TAG, "Failed to play audio: " + soundUri + " exception:" + e);
+            return null;
         }
     }
 
@@ -701,7 +915,7 @@ public class JoH {
                 height, Bitmap.Config.ARGB_8888);
 
         final Canvas canvas = new Canvas(bitmap);
-        if (Home.getPreferencesBooleanDefaultFalse(SHOW_STATISTICS_PRINT_COLOR)) {
+        if (Pref.getBooleanDefaultFalse(SHOW_STATISTICS_PRINT_COLOR)) {
             Paint paint = new Paint();
             paint.setColor(Color.WHITE);
             paint.setStyle(Paint.Style.FILL);
@@ -720,7 +934,7 @@ public class JoH {
             final Canvas canvasf = new Canvas(bitmapf);
 
             Paint paint = new Paint();
-            if (Home.getPreferencesBooleanDefaultFalse(SHOW_STATISTICS_PRINT_COLOR)) {
+            if (Pref.getBooleanDefaultFalse(SHOW_STATISTICS_PRINT_COLOR)) {
                 paint.setColor(Color.WHITE);
                 paint.setStyle(Paint.Style.FILL);
                 canvasf.drawRect(0, 0, width, offset, paint);
@@ -782,45 +996,96 @@ public class JoH {
         }
     }
 
-    public static void wakeUpIntent(Context context, long delayMs, PendingIntent pendingIntent) {
+    public static void cancelAlarm(Context context, PendingIntent serviceIntent) {
+        // do we want a try catch block here?
+        final AlarmManager alarm = (AlarmManager) context.getSystemService(ALARM_SERVICE);
+        if (serviceIntent != null) {
+            Log.d(TAG, "Cancelling alarm " + serviceIntent.getCreatorPackage());
+            alarm.cancel(serviceIntent);
+        } else {
+            Log.d(TAG, "Cancelling alarm: serviceIntent is null");
+        }
+    }
+
+    public static long wakeUpIntentOld(Context context, long delayMs, PendingIntent pendingIntent) {
         final long wakeTime = JoH.tsl() + delayMs;
         Log.d(TAG, "Scheduling wakeup intent: " + dateTimeText(wakeTime));
-        final AlarmManager alarm = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+        final AlarmManager alarm = (AlarmManager) context.getSystemService(ALARM_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, wakeTime, pendingIntent);
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             alarm.setExact(AlarmManager.RTC_WAKEUP, wakeTime, pendingIntent);
         } else
             alarm.set(AlarmManager.RTC_WAKEUP, wakeTime, pendingIntent);
+        return wakeTime;
     }
 
-/*//KS    public static void scheduleNotification(Context context, String title, String body, int delaySeconds, int notification_id) {
+    public static long wakeUpIntent(Context context, long delayMs, PendingIntent pendingIntent) {
+        final long wakeTime = JoH.tsl() + delayMs;
+        if (pendingIntent != null) {
+            Log.d(TAG, "Scheduling wakeup intent: " + dateTimeText(wakeTime));
+            final AlarmManager alarm = (AlarmManager) context.getSystemService(ALARM_SERVICE);
+            try {
+                alarm.cancel(pendingIntent);
+            } catch (Exception e) {
+                Log.e(TAG, "Exception cancelling alarm in wakeUpIntent: " + e);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                if (buggy_samsung) {
+                    alarm.setAlarmClock(new AlarmManager.AlarmClockInfo(wakeTime, null), pendingIntent);
+                } else {
+                    alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, wakeTime, pendingIntent);
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                alarm.setExact(AlarmManager.RTC_WAKEUP, wakeTime, pendingIntent);
+            } else
+                alarm.set(AlarmManager.RTC_WAKEUP, wakeTime, pendingIntent);
+        } else {
+            Log.e(TAG, "wakeUpIntent - pending intent was null!");
+        }
+        return wakeTime;
+    }
+
+    public static void scheduleNotification(Context context, String title, String body, int delaySeconds, int notification_id) {
         final Intent notificationIntent = new Intent(context, Home.class).putExtra(Home.SHOW_NOTIFICATION, title).putExtra("notification_body", body).putExtra("notification_id", notification_id);
         final PendingIntent pendingIntent = PendingIntent.getActivity(context, notification_id, notificationIntent, PendingIntent.FLAG_UPDATE_CURRENT);
         Log.d(TAG, "Scheduling notification: " + title + " / " + body);
         wakeUpIntent(context, delaySeconds * 1000, pendingIntent);
-    }*/
+    }
 
+    public static void cancelNotification(int notificationId) {
+        final NotificationManager mNotifyMgr = (NotificationManager) xdrip.getAppContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        mNotifyMgr.cancel(notificationId);
+    }
 
     public static void showNotification(String title, String content, PendingIntent intent, int notificationId, boolean sound, boolean vibrate, boolean onetime) {
-        final NotificationCompat.Builder mBuilder = notificationBuilder(title, content, intent);
+        showNotification(title, content, intent, notificationId, sound, vibrate, null, null);
+    }
+
+    // ignore channel id and bigmsg
+    public static void showNotification(String title, String content, PendingIntent intent, int notificationId, String channelId, boolean sound, boolean vibrate, PendingIntent deleteIntent, Uri sound_uri, String bigmsg) {
+        showNotification(title, content, intent, notificationId, sound, vibrate, deleteIntent, sound_uri);
+    }
+
+    public static void showNotification(String title, String content, PendingIntent intent, int notificationId, boolean sound, boolean vibrate, PendingIntent deleteIntent, Uri sound_uri) {
+        final Notification.Builder mBuilder = notificationBuilder(title, content, intent);
         final long[] vibratePattern = {0, 1000, 300, 1000, 300, 1000};
         if (vibrate) mBuilder.setVibrate(vibratePattern);
+        if (deleteIntent != null) mBuilder.setDeleteIntent(deleteIntent);
         mBuilder.setLights(0xff00ff00, 300, 1000);
-        if (sound)
-        {
-            Uri soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+        if (sound) {
+            Uri soundUri = (sound_uri != null) ? sound_uri : RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
             mBuilder.setSound(soundUri);
         }
 
         final NotificationManager mNotifyMgr = (NotificationManager) xdrip.getAppContext().getSystemService(Context.NOTIFICATION_SERVICE);
-        if (!onetime) mNotifyMgr.cancel(notificationId);
+        // if (!onetime) mNotifyMgr.cancel(notificationId);
 
         mNotifyMgr.notify(notificationId, mBuilder.build());
     }
 
-    private static NotificationCompat.Builder notificationBuilder(String title, String content, PendingIntent intent) {
-        return new NotificationCompat.Builder(xdrip.getAppContext())
+    private static Notification.Builder notificationBuilder(String title, String content, PendingIntent intent) {
+        return new Notification.Builder(xdrip.getAppContext())
                 .setSmallIcon(R.drawable.ic_action_communication_invert_colors_on)
                 .setContentTitle(title)
                 .setContentText(content)
@@ -879,27 +1144,69 @@ public class JoH {
         return Settings.Global.getInt(context.getContentResolver(), Settings.Global.AIRPLANE_MODE_ON, 0) != 0;
     }
 
+
+    public static byte[] convertPinToBytes(String pin) {
+        if (pin == null) {
+            return null;
+        }
+        byte[] pinBytes;
+        try {
+            pinBytes = pin.getBytes("UTF-8");
+        } catch (UnsupportedEncodingException uee) {
+            Log.e(TAG, "UTF-8 not supported?!?");  // this should not happen
+            return null;
+        }
+        if (pinBytes.length <= 0 || pinBytes.length > 16) {
+            return null;
+        }
+        return pinBytes;
+    }
+
+    public static boolean doPairingRequest(Context context, BroadcastReceiver broadcastReceiver, Intent intent, String mBluetoothDeviceAddress) {
+        return doPairingRequest(context, broadcastReceiver, intent, mBluetoothDeviceAddress, null);
+    }
+
+    public static void vibrateNotice() {
+        final Vibrator vibrator = (Vibrator) xdrip.getAppContext().getSystemService(VIBRATOR_SERVICE);
+        long[] vibrationPattern = {0, 500, 50, 300};
+        final int indexInPatternToRepeat = -1;
+        vibrator.vibrate(vibrationPattern, indexInPatternToRepeat);
+    }
+
     @TargetApi(19)
-    public static void doPairingRequest(Context context, BroadcastReceiver broadcastReceiver, Intent intent, String mBluetoothDeviceAddress) {
+    public static boolean doPairingRequest(Context context, BroadcastReceiver broadcastReceiver, Intent intent, String mBluetoothDeviceAddress, String pinHint) {
         if (BluetoothDevice.ACTION_PAIRING_REQUEST.equals(intent.getAction())) {
             final BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
             if (device != null) {
                 int type = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR);
                 if ((mBluetoothDeviceAddress != null) && (device.getAddress().equals(mBluetoothDeviceAddress))) {
+                    if ((type == PAIRING_VARIANT_PIN) && (pinHint != null)) {
+                        device.setPin(convertPinToBytes(pinHint));
+                        Log.d(TAG, "Setting pairing pin to " + pinHint);
+                        broadcastReceiver.abortBroadcast();
+                    }
                     try {
                         UserError.Log.e(TAG, "Pairing type: " + type);
-                        device.setPairingConfirmation(true);
-                        JoH.static_toast_short("Pairing");
-                        broadcastReceiver.abortBroadcast();
+                        if (type != PAIRING_VARIANT_PIN) {
+                            device.setPairingConfirmation(true);
+                            JoH.static_toast_short("xDrip Pairing");
+                            broadcastReceiver.abortBroadcast();
+                        } else {
+                            Log.d(TAG,"Attempting to passthrough PIN pairing");
+                        }
+
                     } catch (Exception e) {
                         UserError.Log.e(TAG, "Could not set pairing confirmation due to exception: " + e);
+                        vibrateNotice();
                         if (JoH.ratelimit("failed pair confirmation", 200)) {
                             // BluetoothDevice.PAIRING_VARIANT_CONSENT)
                             if (type == 3) {
                                 JoH.static_toast_long("Please confirm the bluetooth pairing request");
+                                return false;
                             } else {
                                 JoH.static_toast_long("Failed to pair, may need to do it via Android Settings");
                                 device.createBond(); // for what it is worth
+                                return false;
                             }
                         }
                     }
@@ -909,6 +1216,122 @@ public class JoH {
             } else {
                 UserError.Log.e(TAG, "Device was null in pairing receiver");
             }
+        }
+        return true;
+    }
+
+    // Use system privileges to force ourselves in to the whitelisted battery optimization list
+    // by reflecting in to the hidden system interface for this. I don't know a better way
+    // to achieve this on android wear because it doesn't offer a user interface for it.
+    @SuppressLint("PrivateApi")
+    public static boolean forceBatteryWhitelisting() {
+        final String myself = xdrip.getAppContext().getPackageName();
+        IDeviceIdleController iDeviceIdleController;
+        Method method;
+        try {
+            method = Class.forName("android.os.ServiceManager").getMethod("getService", String.class);
+            IBinder binder = (IBinder) method.invoke(null, "deviceidle");
+            if (binder != null) {
+                iDeviceIdleController = IDeviceIdleController.Stub.asInterface(binder);
+                Log.d(TAG, "Forcing battery optimization whitelisting for: " + myself);
+                iDeviceIdleController.addPowerSaveWhitelistApp(myself);
+                Log.d(TAG, "Forced battery optimization whitelisting for: " + myself);
+            } else {
+                Log.d(TAG, "Could not gain binder when trying to force whitelisting");
+            }
+            return true;
+        } catch (Exception e) {
+            Log.d(TAG, "Got exception trying to force whitelisting: " + e);
+            return false;
+        }
+    }
+
+    // emulate the system interface ourselves
+    interface IDeviceIdleController extends android.os.IInterface {
+        void addPowerSaveWhitelistApp(String name) throws android.os.RemoteException;
+
+        abstract class Stub extends android.os.Binder implements IDeviceIdleController {
+            private static final java.lang.String DESCRIPTOR = "android.os.IDeviceIdleController";
+
+            public Stub() {
+                this.attachInterface(this, DESCRIPTOR);
+            }
+
+            static IDeviceIdleController asInterface(android.os.IBinder obj) {
+                if ((obj == null)) {
+                    return null;
+                }
+                android.os.IInterface iin = obj.queryLocalInterface(DESCRIPTOR);
+                if (((iin != null) && (iin instanceof IDeviceIdleController))) {
+                    return ((IDeviceIdleController) iin);
+                }
+                return new IDeviceIdleController.Stub.Proxy(obj);
+            }
+
+            @Override
+            public android.os.IBinder asBinder() {
+                return this;
+            }
+
+            static final int TRANSACTION_addPowerSaveWhitelistApp = android.os.IBinder.FIRST_CALL_TRANSACTION;
+
+            @Override
+            public boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply, int flags) throws android.os.RemoteException {
+                switch (code) {
+                    case INTERFACE_TRANSACTION: {
+                        reply.writeString(DESCRIPTOR);
+                        return true;
+                    }
+                    case TRANSACTION_addPowerSaveWhitelistApp: {
+                        data.enforceInterface(DESCRIPTOR);
+                        java.lang.String _arg0;
+                        _arg0 = data.readString();
+                        this.addPowerSaveWhitelistApp(_arg0);
+                        reply.writeNoException();
+                        return true;
+                    }
+                }
+                return true;
+            }
+
+            private static class Proxy implements IDeviceIdleController {
+                private android.os.IBinder mRemote;
+
+                Proxy(android.os.IBinder remote) {
+                    mRemote = remote;
+                }
+
+                @Override
+                public android.os.IBinder asBinder() {
+                    return mRemote;
+                }
+
+                @Override
+                public void addPowerSaveWhitelistApp(java.lang.String name) throws android.os.RemoteException {
+                    android.os.Parcel _data = android.os.Parcel.obtain();
+                    android.os.Parcel _reply = android.os.Parcel.obtain();
+                    try {
+                        _data.writeInterfaceToken(DESCRIPTOR);
+                        _data.writeString(name);
+                        mRemote.transact(Stub.TRANSACTION_addPowerSaveWhitelistApp, _data, _reply, 0);
+                        _reply.readException();
+                    } finally {
+                        _reply.recycle();
+                        _data.recycle();
+                    }
+                }
+            }
+        }
+    }
+
+
+    public static String getLocalBluetoothName() {
+        try {
+            final String name = BluetoothAdapter.getDefaultAdapter().getName();
+            if (name == null) return "";
+            return name;
+        } catch (Exception e) {
+            return "";
         }
     }
 
@@ -960,6 +1383,25 @@ public class JoH {
         }
     }
 
+    public static boolean refreshDeviceCache(String thisTAG, BluetoothGatt gatt){
+        try {
+            final Method method = gatt.getClass().getMethod("refresh", new Class[0]);
+            if (method != null) {
+                return (Boolean) method.invoke(gatt, new Object[0]);
+            }
+        }
+        catch (Exception e) {
+            Log.e(thisTAG, "An exception occured while refreshing gatt device cache: "+e);
+        }
+        return false;
+    }
+
+    public static ByteBuffer bArrayAsBuffer(byte[] bytes) {
+        final ByteBuffer bb = ByteBuffer.allocate(bytes.length);
+        bb.put(bytes);
+        return bb;
+    }
+
     public synchronized static void restartBluetooth(final Context context) {
         restartBluetooth(context, 0);
     }
@@ -990,5 +1432,47 @@ public class JoH {
                 }
             }
         }.start();
+    }
+
+    public static Map<String, String> bundleToMap(Bundle bundle) {
+        final HashMap<String, String> map = new HashMap<>();
+        for (String key : bundle.keySet()) {
+            Object value = bundle.get(key);
+            if (value != null) {
+                map.put(key, value.toString());
+            }
+        }
+        return map;
+    }
+
+    public static long checksum(byte[] bytes) {
+        if (bytes == null) return 0;
+        final CRC32 crc = new CRC32();
+        crc.update(bytes);
+        return crc.getValue();
+    }
+
+    public static byte[] bchecksum(byte[] bytes) {
+        final long c = checksum(bytes);
+        final byte[] buf = new byte[4];
+        ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN).putInt((int) c);
+        return buf;
+    }
+
+    public static boolean checkChecksum(byte[] bytes) {
+        if ((bytes == null) || (bytes.length < 4)) return false;
+        final CRC32 crc = new CRC32();
+        crc.update(bytes, 0, bytes.length - 4);
+        final long buffer_crc = UnsignedInts.toLong(ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).getInt(bytes.length - 4));
+        return buffer_crc == crc.getValue();
+    }
+
+    public static int parseIntWithDefault(String number, int radix, int defaultVal) {
+        try {
+            return Integer.parseInt(number, radix);
+        } catch (NumberFormatException e) {
+            Log.e(TAG, "Error parsing integer number = " + number + " radix = " + radix);
+            return defaultVal;
+        }
     }
 }
